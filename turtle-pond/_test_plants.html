@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>阶段5-② 植物系统 测试</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { PLANT_SPECIES, DEFAULT_PLANTS, PlantField } from './src/plants.js';
+
+    setTimeout(() => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+
+      try {
+        const app = window.pondApp;
+        ok(!!app, '场景已初始化');
+        ok(!!app.plants, '植物群落已挂载');
+
+        // ── 1. 品种定义完整 ────────────────────────────
+        const ids = Object.keys(PLANT_SPECIES);
+        log.push(`   植物品种: ${ids.join(', ')}`);
+        ok(ids.length >= 5, `植物品种 ≥5（实际 ${ids.length}）`);
+        const kinds = new Set(ids.map(id => PLANT_SPECIES[id].kind));
+        ok(kinds.has('bank'), '存在岸边植物（bank）');
+        ok(kinds.has('surface'), '存在水面浮叶（surface）');
+        ok(kinds.has('submerged'), '存在沉水植物（submerged）');
+
+        // ── 2. 默认群落生成数量正确 ────────────────────
+        const expect = Object.values(DEFAULT_PLANTS).reduce((a, b) => a + b, 0);
+        const total = app.plants.plants.length;
+        ok(total === expect, `默认植物总数 ${expect}（实际 ${total}）`);
+
+        const pop = app.plants.population();
+        log.push('   植物分布: ' + JSON.stringify(pop));
+        ok(Object.keys(pop).length === ids.length, '每个品种都有实例');
+
+        // ── 3. 分层数量 ────────────────────────────────
+        const nBank = app.plants.byKind('bank').length;
+        const nSurface = app.plants.byKind('surface').length;
+        const nSub = app.plants.byKind('submerged').length;
+        log.push(`   分层: 岸边 ${nBank} / 浮叶 ${nSurface} / 沉水 ${nSub}`);
+        ok(nBank + nSurface + nSub === total, '三层数量之和 = 总数');
+
+        // ── 4. 位置合理性 ──────────────────────────────
+        const bankOnLand = app.plants.byKind('bank').every(p => p.y <= app.world.bankLineAt(p.x) + 2);
+        ok(bankOnLand, '岸边植物都在岸线之上（陆地）');
+
+        const surfaceInWater = app.plants.byKind('surface').every(p => app.world.isWater(p.x, p.y) || p.y > app.world.bankLineAt(p.x));
+        ok(surfaceInWater, '浮叶植物都在水域内');
+
+        const subNearBottom = app.plants.byKind('submerged').every(p => p.y > app.world.bankLineAt(p.x));
+        ok(subNearBottom, '沉水植物在水面之下');
+
+        // ── 5. 遮蔽点查询 ──────────────────────────────
+        const shelters = app.plants.shelters();
+        log.push(`   遮蔽点数量: ${shelters.length}`);
+        ok(shelters.length > 0, '存在遮蔽点（供鱼群躲藏）');
+        const s0 = shelters[0];
+        ok(app.plants.isSheltered(s0.x, s0.y), 'isSheltered 在遮蔽点内返回 true');
+        ok(!app.plants.isSheltered(-999, -999), 'isSheltered 在远处返回 false');
+
+        // ── 6. 浮叶可以被推动 ──────────────────────────
+        const pad = app.plants.byKind('surface')[0];
+        const beforeX = pad.ox;
+        // 模拟一条鱼正好压在叶子上
+        for (let i = 0; i < 20; i++) {
+          pad.update(0.05, 1.0, [{ x: pad.x + 3, y: pad.y + 3, size: 14 }]);
+        }
+        ok(Math.abs(pad.ox - beforeX) > 0.5, `浮叶被生物推动（偏移 ${pad.ox.toFixed(2)}）`);
+
+        // 再空跑，应回弹
+        const pushedX = pad.ox;
+        for (let i = 0; i < 120; i++) pad.update(0.05, 2.0, []);
+        ok(Math.abs(pad.ox) < Math.abs(pushedX), `浮叶会回弹到原位（${pushedX.toFixed(2)} → ${pad.ox.toFixed(2)}）`);
+
+        // ── 7. 运行时不崩 + 摆动相位推进 ───────────────
+        const p0 = app.plants.plants[0];
+        const ph0 = p0.swayPhase;
+        for (let i = 0; i < 100; i++) app.plants.update(0.05, i * 0.05, []);
+        ok(true, '植物 update 100 帧无异常');
+
+        // ── 8. setPlants 重建 ──────────────────────────
+        window.pond.setPlants({ lotus: 6, reed: 12 });
+        const pop2 = app.plants.population();
+        log.push('   setPlants 后: ' + JSON.stringify(pop2));
+        ok(app.plants.plants.length === 18, `setPlants 重建为 18 株（实际 ${app.plants.plants.length}）`);
+        ok(pop2.lotus === 6 && pop2.reed === 12, '品种数量正确（荷花6 + 芦苇12）');
+        ok(!pop2.lilypad, '未指定的品种已清除');
+
+        // ── 9. 开关植物 ────────────────────────────────
+        const t1 = window.pond.togglePlants();
+        const t2 = window.pond.togglePlants();
+        ok(t1 === false && t2 === true, `togglePlants 正常（${t1} → ${t2}）`);
+
+        // ── 10. 鱼群遮蔽状态会被标记 ───────────────────
+        window.pond.setPlants({ lilypad: 20 });
+        const pad2 = app.plants.byKind('surface')[0];
+        const fish = app.fishes[0];
+        fish.x = pad2.px; fish.y = pad2.py;
+        fish.flock(app.fishes, { active: false }, [], 0.05, app.plants);
+        ok(fish.sheltered === true, '鱼在植物遮蔽区内 sheltered = true');
+        fish.x = 5; fish.y = app.world.h - 5;
+        fish.flock(app.fishes, { active: false }, [], 0.05, app.plants);
+        ok(fish.sheltered === false, '鱼在遮蔽区外 sheltered = false');
+
+        // ── 11. 品种列表接口 ───────────────────────────
+        const ps = window.pond.plantSpecies();
+        ok(ps.length === ids.length, `plantSpecies() 返回 ${ids.length} 种`);
+
+        log.push('');
+        log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+      }
+      document.getElementById('report').textContent = log.join('\n');
+      window.__TEST_DONE__ = true;
+    }, 600);
+  </script>
+</body>
+</html>

@@ -1,0 +1,68 @@
+{
+  "_comment": "Lively 设置面板。品种数量由 species 字段控制（见下），此处暴露常用项。",
+  "fishCount": {
+    "type": "slider",
+    "text": "小鱼总数",
+    "value": 14,
+    "min": 0,
+    "max": 60,
+    "step": 1
+  },
+  "turtleCount": {
+    "type": "slider",
+    "text": "乌龟总数",
+    "value": 2,
+    "min": 0,
+    "max": 6,
+    "step": 1
+  },
+  "duckweedCount": {
+    "type": "slider",
+    "text": "浮萍密度",
+    "value": 60,
+    "min": 0,
+    "max": 200,
+    "step": 5
+  },
+  "waterTop": {
+    "type": "color",
+    "text": "水面颜色（上）",
+    "value": "#4a8fa8"
+  },
+  "waterBottom": {
+    "type": "color",
+    "text": "水底颜色（下）",
+    "value": "#1e4a5f"
+  },
+  "quality": {
+    "type": "dropdown",
+    "text": "画质",
+    "value": "balanced",
+    "items": ["eco", "balanced", "detail"]
+  },
+  "showFps": {
+    "type": "checkbox",
+    "text": "显示帧率",
+    "value": true
+  },
+  "showPlants": {
+    "type": "checkbox",
+    "text": "显示植物（睡莲/芦苇/水草）",
+    "value": true
+  },
+  "species": {
+    "_comment": "品种配置：key=品种 id，value=数量。改这里即可自定义水塘物种组成。",
+    "fish": {
+      "crucian": 4,
+      "koi": 2,
+      "grasscarp": 2,
+      "whitebait": 3,
+      "goldfish": 2,
+      "gambusia": 1
+    },
+    "turtle": {
+      "redear": 1,
+      "chinese": 1
+    }
+  }
+}

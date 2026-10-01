@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>阶段5-③ 成长与繁殖 测试</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { CONFIG } from './src/config.js';
+    import { Egg } from './src/turtle.js';
+
+    setTimeout(() => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+      const G = CONFIG.growth;
+
+      try {
+        const app = window.pondApp;
+        ok(!!app, '场景已初始化');
+        ok(!!CONFIG.growth, 'growth 配置段存在');
+        ok(Array.isArray(app.eggs), 'eggs 数组已挂载');
+
+        // ── 1. 初始种群全是成年（无幼苗乱入）──────────
+        ok(app.fishes.every(f => f.isAdult), '初始鱼全为成年');
+        ok(app.turtles.every(t => t.isAdult), '初始龟全为成年');
+
+        // ── 2. 鱼苗模式：体型小、年龄 0 ────────────────
+        const n0 = app.fishes.length;
+        window.pond.addFish(1, 'koi', { baby: true });
+        const fry = app.fishes[app.fishes.length - 1];
+        ok(!fry.isAdult && fry.age === 0, '鱼苗 age=0 未成年');
+        ok(Math.abs(fry.size - fry.adultSize * G.babySizeRatio) < 0.01,
+          `鱼苗体型 = 成年×${G.babySizeRatio}（${fry.size.toFixed(1)} vs ${(fry.adultSize * G.babySizeRatio).toFixed(1)}）`);
+        ok(fry.size < fry.adultSize, '鱼苗比成年小');
+
+        // ── 3. 成长：模拟时间推进，体型逐渐长大 ────────
+        const frySize0 = fry.size;
+        for (let i = 0; i < 200; i++) fry.update(0.5);   // 100 秒
+        ok(fry.isAdult, `推进 100s 后成年（age=${fry.age.toFixed(0)}）`);
+        ok(fry.size > frySize0 * 1.5, `体型显著长大（${frySize0.toFixed(1)} → ${fry.size.toFixed(1)}）`);
+        ok(Math.abs(fry.size - fry.adultSize) < 0.5, '成年后体型≈成年尺寸');
+
+        // ── 4. 成年后速度重算（体型影响速度）──────────
+        ok(fry.maxSpeed > 0 && isFinite(fry.maxSpeed), `速度有效（${fry.maxSpeed.toFixed(1)}）`);
+
+        // ── 5. 龟宝宝 + 成长 ───────────────────────────
+        window.pond.addTurtle('chinese', { baby: true });
+        const bt = app.turtles[app.turtles.length - 1];
+        ok(!bt.isAdult && bt.size < bt.adultSize, '幼龟初始小体型');
+        for (let i = 0; i < 410; i++) bt.update(0.6, [], { active: false }, app.turtles);
+        ok(bt.isAdult, '幼龟随时间成年');
+        ok(Math.abs(bt.size - bt.adultSize) < 0.5, '幼龟成年后体型到位');
+
+        // ── 6. 龟蛋：创建 + 孵化倒计时 ─────────────────
+        const e = new Egg(app.world, app.world.w * 0.5, 30, app.turtles[0].species);
+        ok(e.eggs.length >= G.eggsPerClutch[0] && e.eggs.length <= G.eggsPerClutch[1],
+          `蛋数在 ${G.eggsPerClutch.join('~')} 内（实际 ${e.eggs.length}）`);
+        ok(!e.hatched, '新蛋未孵化');
+        // 孵化时长带 rand(0.9~1.15) 抖动，推进 1.3 倍必孵化
+        e.update(G.eggIncubation * 1.3 + 1);
+        ok(e.hatched, '倒计时结束后孵化标记');
+
+        // ── 7. 产蛋走完整 BASK 状态机（体力消耗+冷却在状态机内）──
+        const eggN0 = app.eggs.length;
+        const female = app.turtles.find(t => t.isAdult);
+        female.hunger = 0.1;
+        female.reproCooldown = 0;
+        female.x = app.world.w * 0.5;
+        female.y = 30;
+        female.state = 'bask';
+        female.stateTime = 0;
+        female._baskGoal = 999;               // 保持 BASK 不退出
+        let laid = false;
+        for (let i = 0; i < 400; i++) {
+          female.update(0.05, [], { active: false }, app.turtles);
+          female.state = 'bask';              // 强制留在 BASK
+          female.stateTime = 0;
+          if (app.eggs.length > eggN0) { laid = true; break; }
+        }
+        ok(laid === true, '晒背中产蛋触发');
+        ok(app.eggs.length > eggN0, `蛋已入列（${eggN0} → ${app.eggs.length}）`);
+        ok(female.hunger > 0.3, `产蛋消耗体力（饥饿 ${female.hunger.toFixed(2)} > 0.3）`);
+        ok(female.reproCooldown === G.turtleReproCooldown, '产蛋后冷却重置');
+
+        // ── 8. 龟数量上限：_turtleLayEggs 在满员时拒绝 ─
+        const saved = app.turtles;
+        app.turtles = new Array(G.turtleCap).fill(app.turtles[0]);  // 假装满员
+        female.reproCooldown = 0;
+        const refused = app._turtleLayEggs(female);
+        ok(refused === false, '满员时拒绝产蛋');
+        app.turtles = saved;
+
+        // ── 9. 主循环繁殖：喂饱两条同种成年鱼，快进判定 ─
+        window.pond.setPopulation({ fish: { crucian: 2 }, turtle: {} });
+        const [a, b] = app.fishes;
+        a.hunger = 0.05; b.hunger = 0.05;
+        a.reproCooldown = 0; b.reproCooldown = 0;
+        a.x = b.x + 10; a.y = b.y + 10;
+        // 测试加速：概率拉满 + 鱼几乎不动 + 饥饿几乎不涨（自然概率 5%/s，8s 内仅 34% 会触发）
+        const savedSpeed = CONFIG.fish.maxSpeed;
+        const savedDecay = CONFIG.fish.hungerDecay;
+        const savedChance = CONFIG.growth.fishReproChance;
+        CONFIG.fish.maxSpeed = 2;
+        CONFIG.fish.hungerDecay = 0.002;
+        CONFIG.growth.fishReproChance = 1.0;
+        const fishN0 = app.fishes.length;
+        for (let i = 0; i < 160; i++) app._update(0.05, i * 0.05);
+        // 还原参数
+        CONFIG.fish.maxSpeed = savedSpeed;
+        CONFIG.fish.hungerDecay = savedDecay;
+        CONFIG.growth.fishReproChance = savedChance;
+        ok(app.fishes.length > fishN0, `繁殖发生（${fishN0} → ${app.fishes.length} 条）`);
+        const newFry = app.fishes.filter(f => !f.isAdult);
+        ok(newFry.length > 0, `出现鱼苗 ${newFry.length} 条`);
+        ok(a.reproCooldown > 0 || b.reproCooldown > 0, '繁殖后进入冷却');
+
+        // ── 10. 孵化出幼龟（egg.hatched → turtle 生成）─
+        window.pond.setPopulation({ fish: {}, turtle: { chinese: 1 } });
+        const t0 = app.turtles[0];
+        const egg2 = new Egg(app.world, app.world.w * 0.5, 30, t0.species);
+        egg2.incubation = 0.05;   // 立刻孵化
+        app.eggs.push(egg2);
+        const tn0 = app.turtles.length;
+        for (let i = 0; i < 5; i++) app._update(0.05, i * 0.05);
+        ok(app.turtles.length === tn0 + 1, `蛋孵化出幼龟（${tn0} → ${app.turtles.length}）`);
+        const newborn = app.turtles[app.turtles.length - 1];
+        ok(!newborn.isAdult, '新生龟是幼体');
+
+        // ── 11. eco 统计接口 ───────────────────────────
+        const eco = window.pond.eco();
+        log.push('   eco = ' + JSON.stringify(eco));
+        ok(typeof eco.fish === 'number' && typeof eco.eggs === 'number', 'eco() 返回正常');
+
+        // ── 12. 长跑稳定性（60 秒）─────────────────────
+        let crashed = false;
+        try {
+          for (let i = 0; i < 1200; i++) app._update(0.05, i * 0.05);
+        } catch (err) { crashed = true; log.push('   ' + err.message); }
+        ok(!crashed, '长跑 60s 无异常');
+        ok(app.fishes.length <= G.fishCap && app.turtles.length <= G.turtleCap,
+          `数量在上限内（鱼 ${app.fishes.length}/${G.fishCap}，龟 ${app.turtles.length}/${G.turtleCap}）`);
+        ok(app.fishes.every(f => isFinite(f.x) && isFinite(f.y)), '鱼坐标无 NaN');
+        ok(app.turtles.every(t => isFinite(t.x) && isFinite(t.y)), '龟坐标无 NaN');
+
+        log.push('');
+        log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+      }
+      document.getElementById('report').textContent = log.join('\n');
+      window.__TEST_DONE__ = true;
+    }, 600);
+  </script>
+</body>
+</html>

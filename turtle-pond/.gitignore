@@ -1,0 +1,24 @@
+# ── 依赖（将来若引入 npm 包时生效）──
+node_modules/
+package-lock.json
+
+# ── Python（阶段 4 若用 pywin32 时生效）──
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# ── 临时与调试产物 ──
+_shot.png
+_*.log
+_*.txt
+_downloads/
+
+# ── 编辑器与系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── 日志 ──
+*.log

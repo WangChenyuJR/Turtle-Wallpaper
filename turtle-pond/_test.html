@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>物种系统运行时测试</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.35; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.85); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script>
+    // 等场景初始化后跑一轮物种 API 测试
+    setTimeout(() => {
+      const log = [];
+      const ok = (c, m) => log.push((c ? '✅ ' : '❌ ') + m);
+      try {
+        const app = window.pondApp;
+        ok(!!app, '场景已初始化');
+        ok(!!window.pond, '控制台 API 已挂载');
+
+        // 1) 初始种群（应来自 DEFAULT_POPULATION / LivelyProperties）
+        const p0 = window.pond.population();
+        log.push('   初始 fish = ' + JSON.stringify(p0.fish));
+        log.push('   初始 turtle = ' + JSON.stringify(p0.turtle));
+        ok(app.fishes.length === 14, `初始鱼数 14（实际 ${app.fishes.length}）`);
+        ok(app.turtles.length === 2, `初始龟数 2（实际 ${app.turtles.length}）`);
+
+        // 2) 品种列表
+        const sp = window.pond.species();
+        ok(sp.fish.length === 6, `鱼品种 6 个（实际 ${sp.fish.length}）`);
+        ok(sp.turtle.length === 7, `龟品种 7 个（实际 ${sp.turtle.length}，阶段5-① 新增枯叶龟/缅甸陆龟）`);
+
+        // 3) 按品种添加
+        window.pond.addFish(3, 'koi');
+        const koiN = app.fishes.filter(f => f.species.id === 'koi').length;
+        ok(koiN === 2 + 3, `加 3 条锦鲤 → 共 ${koiN}（期望 5）`);
+
+        // 4) 添加指定品种乌龟
+        const before = app.turtles.length;
+        window.pond.addTurtle('softshell');
+        const last = app.turtles[app.turtles.length - 1];
+        ok(app.turtles.length === before + 1, '加龟成功');
+        ok(last.species.id === 'softshell', `龟品种 = ${last.species.id}（期望 softshell）`);
+
+        // 5) 品种实例颜色确实生效
+        // 注：size = 独立随机基数(6~13) × sizeScale，直接比较两个实例存在随机碰撞，
+        // 确定性断言应落在品种系数与实例的合理区间上，而不是随机实例的大小关系。
+        const koi = app.fishes.find(f => f.species.id === 'koi');
+        const whitebait = app.fishes.find(f => f.species.id === 'whitebait');
+        ok(koi.species.sizeScale > whitebait.species.sizeScale, `锦鲤体型系数 > 白鲦（${koi.species.sizeScale} > ${whitebait.species.sizeScale}）`);
+        const lo = CONFIG.fish.minSize * whitebait.species.sizeScale;
+        const hi = CONFIG.fish.maxSize * koi.species.sizeScale;
+        ok(koi.size >= lo && koi.size <= hi && whitebait.size >= lo && whitebait.size <= hi,
+           `实例体型都在随机区间内（${whitebait.size.toFixed(1)}~${koi.size.toFixed(1)} ∈ ${lo.toFixed(1)}~${hi.toFixed(1)}）`);
+        ok(koi.maxSpeed < whitebait.maxSpeed, `白鲦比锦鲤快（${whitebait.maxSpeed.toFixed(1)} > ${koi.maxSpeed.toFixed(1)}）`);
+
+        // 6) setPopulation 重建
+        window.pond.setPopulation({ fish: { goldfish: 7 }, turtle: { mapTurtle: 2 } });
+        const p1 = window.pond.population();
+        ok(app.fishes.length === 7 && app.fishes.every(f => f.species.id === 'goldfish'), 'setPopulation 只留 7 条金鱼');
+        ok(app.turtles.length === 2 && app.turtles.every(t => t.species.id === 'mapTurtle'), 'setPopulation 只留 2 只地图龟');
+
+        // 7) 投喂
+        window.pond.feed(800, 500);
+        ok(app.food.aliveCount === 10, `投喂生成 10 颗（实际 ${app.food.aliveCount}）`);
+
+        // 8) 跑 2 秒确认更新无异常（同时统计 rAF 帧数以排除无头假象）
+        const snapshot = app.fishes.map(f => ({ x: f.x, y: f.y }));
+        let rafCount = 0;
+        const countRaf = () => { rafCount++; requestAnimationFrame(countRaf); };
+        requestAnimationFrame(countRaf);
+        setTimeout(() => {
+          const moved = app.fishes.filter((f, i) =>
+            Math.abs(f.x - snapshot[i].x) > 0.5 || Math.abs(f.y - snapshot[i].y) > 0.5).length;
+          log.push(`   [诊断] 窗口内 rAF 帧数: ${rafCount}`);
+          if (rafCount === 0) {
+            log.push('⚠️ 无头虚拟时钟未驱动 rAF —— 移动项无法在无头环境判定（非应用 bug）');
+          } else {
+            ok(moved > 0, `鱼在游动（${moved}/${app.fishes.length} 条位置变化）`);
+          }
+          ok(app.fishes.every(f => isFinite(f.x) && isFinite(f.y)), '坐标数值正常（无 NaN）');
+          ok(app.fishes.every(f => app.world.isWater(f.x, f.y)), '所有鱼都在水域内');
+          log.push('');
+          log.push('—— 测试结束 ——');
+          document.getElementById('report').textContent = log.join('\n');
+          window.__TEST_DONE__ = true;
+        }, 2000);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+        document.getElementById('report').textContent = log.join('\n');
+        window.__TEST_DONE__ = true;
+      }
+    }, 500);
+  </script>
+</body>
+</html>

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>精灵表导出 · turtle-pond</title>
+<style>
+  body { margin:0; background:#3a88a8; }
+  canvas { display:block; image-rendering:auto; }
+</style>
+</head>
+<body>
+<script type="module">
+/**
+ * 精灵表导出页 —— 用项目真实绘制代码，把某品种的动画逐帧画在一条横带上。
+ *
+ * 用法（Edge 无头截图即得 PNG 精灵表）：
+ *   msedge --headless=new --allow-file-access-from-files \
+ *     --screenshot=sheet.png --window-size=<宽>,<高> \
+ *     "file:///.../_spritesheet.html?kind=turtle&id=turtleSample&frames=8&cell=128"
+ *
+ * 参数：
+ *   kind    turtle | fish（必填）
+ *   id      品种 id，须已存在于 data/generated.js（默认取第一个）
+ *   frames  帧数（默认 8）
+ *   cell    单元格边长 px（默认 128）
+ *   row     附加行：swim/bask 龟姿态对比（可选 turtle）
+ */
+import { Fish } from './src/fish.js';
+import { Turtle, STATE } from './src/turtle.js';
+import { registerFishSpecies, registerTurtleSpecies }
+  from './src/species.js';
+import { PHOTO_FISH_SPECIES, PHOTO_TURTLE_SPECIES } from './data/generated.js';
+
+Object.values(PHOTO_FISH_SPECIES || {}).forEach(registerFishSpecies);
+Object.values(PHOTO_TURTLE_SPECIES || {}).forEach(registerTurtleSpecies);
+
+const q = new URLSearchParams(location.search);
+const kind = q.get('kind') || 'turtle';
+const frames = Math.max(1, parseInt(q.get('frames') || '8', 10));
+const cell = Math.max(48, parseInt(q.get('cell') || '128', 10));
+
+const dict = kind === 'fish' ? PHOTO_FISH_SPECIES : PHOTO_TURTLE_SPECIES;
+const id = q.get('id') || Object.keys(dict)[0];
+const sp = dict[id];
+if (!sp) {
+  document.body.textContent = `未找到品种：${kind}/${id}。可用：${Object.keys(dict).join(', ')}`;
+  throw new Error('species not found');
+}
+
+const world = {
+  w: cell * frames, h: cell,
+  waterTop: 4, waterBottom: cell - 4,
+  bankLineAt: () => cell - 10,
+};
+
+const cv = document.createElement('canvas');
+cv.width = cell * frames;
+cv.height = cell;
+document.body.appendChild(cv);
+const ctx = cv.getContext('2d');
+
+for (let i = 0; i < frames; i++) {
+  const ph = (i / frames) * Math.PI * 2;      // 一整圈动画相位
+  let obj;
+  if (kind === 'fish') {
+    obj = new Fish(world, sp);
+    obj.tailPhase = ph;
+    obj.size = cell * 0.30;
+  } else {
+    obj = new Turtle(world, 0, sp);
+    obj.state = STATE.SWIM;
+    obj.flipperPhase = ph;
+    obj.headBob = ph;
+    obj.size = cell * 0.34;
+  }
+  obj.x = cell * i + cell / 2;
+  obj.y = cell / 2;
+  obj.angle = 0;
+  obj.draw(ctx);
+}
+
+// 供截图脚本轮询
+window.__sheetReady = { kind, id, frames, cell, w: cv.width, h: cv.height };
+</script>
+</body>
+</html>

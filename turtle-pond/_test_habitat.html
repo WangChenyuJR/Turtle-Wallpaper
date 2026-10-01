@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>阶段5-① 陆龟/水龟分类 测试</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { TURTLE_SPECIES, HABITAT_PRESETS, turtleBehavior, HABITAT_LABELS } from './src/species.js';
+
+    setTimeout(() => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+
+      try {
+        const app = window.pondApp;
+        ok(!!app, '场景已初始化');
+
+        // ── 1. 每个龟种都有 habitat ─────────────────────
+        const ids = Object.keys(TURTLE_SPECIES);
+        log.push(`   龟品种: ${ids.join(', ')}`);
+        ok(ids.length >= 7, `龟种数量 ≥7（实际 ${ids.length}）`);
+        const allHaveHabitat = ids.every(id => !!TURTLE_SPECIES[id].habitat);
+        ok(allHaveHabitat, '所有龟种都定义了 habitat');
+
+        // ── 2. habitat 取值合法 ─────────────────────────
+        const valid = ['aquatic', 'semi', 'terrestrial', 'marsh'];
+        const allValid = ids.every(id => valid.includes(TURTLE_SPECIES[id].habitat));
+        ok(allValid, `habitat 取值均在 ${valid.join('/')} 内`);
+
+        // ── 3. 有陆龟、有水龟（分类确实产生了差异）──────
+        const byHab = {};
+        for (const id of ids) {
+          const h = TURTLE_SPECIES[id].habitat;
+          byHab[h] = (byHab[h] || 0) + 1;
+        }
+        log.push('   栖息类型分布: ' + JSON.stringify(byHab));
+        ok(!!byHab.terrestrial, '存在陆龟（terrestrial）');
+        ok(!!byHab.aquatic, '存在水龟（aquatic）');
+        ok(!!byHab.semi, '存在半水龟（semi）');
+
+        // ── 4. turtleBehavior 解析正确 ──────────────────
+        const land = turtleBehavior(TURTLE_SPECIES.burmese);   // 缅甸陆龟
+        const aqua = turtleBehavior(TURTLE_SPECIES.softshell); // 甲鱼
+        ok(land.baskingChance > aqua.baskingChance,
+          `陆龟上岸倾向 > 水龟（${land.baskingChance} > ${aqua.baskingChance}）`);
+        ok(land.waterBias < aqua.waterBias,
+          `陆龟亲水度 < 水龟（${land.waterBias} < ${aqua.waterBias}）`);
+        ok(land.baskDuration[1] > aqua.baskDuration[1],
+          `陆龟晒背更久（${land.baskDuration[1]}s > ${aqua.baskDuration[1]}s）`);
+
+        // ── 5. 缺省品种走 habitat 预设 ──────────────────
+        const fake = { id: 'x', habitat: 'terrestrial' };
+        const b = turtleBehavior(fake);
+        ok(b.baskingChance === HABITAT_PRESETS.terrestrial.baskingChance,
+          `无显式参数时采用 habitat 预设（${b.baskingChance}）`);
+
+        // ── 6. 实例确实带 habitat + behavior ────────────
+        window.pond.addTurtle('burmese');
+        const burmese = app.turtles[app.turtles.length - 1];
+        ok(burmese.habitat === 'terrestrial', `缅甸陆龟实例 habitat = ${burmese.habitat}`);
+        ok(!!burmese.behavior, '实例持有 behavior 参数对象');
+
+        // ── 7. 水龟不应长期待在岸上 ─────────────────────
+        window.pond.setPopulation({ fish: {}, turtle: { softshell: 3, burmese: 3 } });
+        // 强制推进：手动把一只水龟放到岸上，跑 update 后应被拉回
+        const aquaT = app.turtles.find(t => t.habitat === 'aquatic');
+        const landT = app.turtles.find(t => t.habitat === 'terrestrial');
+        aquaT.x = app.world.w * 0.5;
+        aquaT.y = 20;                       // 强塞到岸上
+        aquaT.state = 'swim';
+        for (let i = 0; i < 30; i++) aquaT.update(0.05, [], { active: false }, app.turtles);
+        const aquaBackInWater = app.world.isWater(aquaT.x, aquaT.y);
+        ok(aquaBackInWater, '水龟被强行放上岸后会回到水域');
+
+        // ── 8. 陆龟初始/行为上确实在岸上活动 ───────────
+        landT.x = app.world.w * 0.5;
+        landT.y = 30;
+        landT.state = 'bask';
+        landT.stateTime = 0;
+        for (let i = 0; i < 20; i++) landT.update(0.05, [], { active: false }, app.turtles);
+        ok(app.world.isBank(landT.x, landT.y), '陆龟停留在岸边（不被赶下水）');
+
+        // ── 9. habitatStats 接口 ────────────────────────
+        const hs = window.pond.habitats();
+        log.push('   habitatStats.byHabitat = ' + JSON.stringify(hs.byHabitat));
+        ok(Object.keys(hs.byHabitat).length >= 1, 'habitatStats 正常返回');
+
+        // ── 10. 长时间跑不崩 + 无 NaN ──────────────────
+        for (let s = 0; s < 200; s++) {
+          for (const t of app.turtles) t.update(0.05, [], { active: false }, app.turtles);
+        }
+        ok(app.turtles.every(t => isFinite(t.x) && isFinite(t.y)), '长跑后坐标无 NaN');
+        const stateDist = {};
+        for (const t of app.turtles) stateDist[t.state] = (stateDist[t.state] || 0) + 1;
+        log.push('   状态分布(长跑后): ' + JSON.stringify(stateDist));
+        // 水龟不出现在 bask（或极少）
+        const aquaBasking = app.turtles.filter(t => t.habitat === 'aquatic' && t.state === 'bask').length;
+        log.push(`   水龟晒背中: ${aquaBasking} 只（应为 0 或很少）`);
+
+        log.push('');
+        log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+      }
+      document.getElementById('report').textContent = log.join('\n');
+      window.__TEST_DONE__ = true;
+    }, 600);
+  </script>
+</body>
+</html>

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>照片简图图集 · turtle-pond</title>
+<style>
+  :root { --bg:#f6f3ea; --ink:#2c2a24; --line:#d8d2c2; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:28px 32px 60px; background:var(--bg); color:var(--ink);
+         font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  h1 { font-size:20px; margin:0 0 4px; font-weight:600; }
+  .sub { font-size:13px; color:#7a7466; margin-bottom:22px; }
+  h2 { font-size:15px; margin:30px 0 12px; padding-bottom:6px;
+       border-bottom:1px solid var(--line); font-weight:600; }
+  .grid { display:flex; flex-wrap:wrap; gap:16px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px;
+          padding:12px; width:270px; }
+  .card canvas { display:block; background:linear-gradient(#8fb8c9,#6f9cb0);
+                 border-radius:6px; width:246px; height:150px; }
+  .name { font-size:13px; font-weight:600; margin-top:8px; }
+  .meta { font-size:11px; color:#8a8478; margin-top:2px; }
+  .chips { display:flex; gap:5px; margin-top:8px; flex-wrap:wrap; }
+  .chip { display:flex; align-items:center; gap:4px; font-size:10px; color:#6b6659;
+          background:#f2efe6; border-radius:4px; padding:2px 5px; }
+  .dot { width:11px; height:11px; border-radius:3px; border:1px solid rgba(0,0,0,.15); }
+  .frames { display:flex; gap:8px; margin-top:8px; overflow-x:auto; }
+  .frames canvas { width:76px; height:76px; flex:0 0 auto; }
+  .empty { color:#8a8478; font-size:13px; }
+</style>
+</head>
+<body>
+<h1>照片 → 简图 图集预览</h1>
+<div class="sub">用项目真实的绘制代码渲染（species.js 配置驱动）。下方色卡即提取出的调色板。</div>
+<div id="root"></div>
+
+<script type="module">
+import { Fish } from './src/fish.js';
+import { Turtle } from './src/turtle.js';
+import { CONFIG } from './src/config.js';
+import { registerFishSpecies, registerTurtleSpecies }
+  from './src/species.js';
+import { PHOTO_FISH_SPECIES, PHOTO_TURTLE_SPECIES } from './data/generated.js';
+
+// 1) 把照片生成的品种注册进运行时字典
+Object.values(PHOTO_FISH_SPECIES || {}).forEach(registerFishSpecies);
+Object.values(PHOTO_TURTLE_SPECIES || {}).forEach(registerTurtleSpecies);
+
+const SWIM = 'swim';   // 与 turtle.js STATE.SWIM 一致
+
+/** 最小假 world：只提供绘制路径会读到的字段 */
+function fakeWorld() {
+  return {
+    w: 246, h: 150,
+    waterTop: 12, waterBottom: 140,
+    bankLineAt: () => 118,
+  };
+}
+
+/** 在离屏画布上把一只生物画出来。
+ *  构造签名：Fish(world, species, opts) / Turtle(world, index, species, opts) */
+function drawCreature(kind, speciesId, opts = {}) {
+  const cv = document.createElement('canvas');
+  cv.width = 246 * 2; cv.height = 150 * 2;             // 2x 便于看清细节
+  const ctx = cv.getContext('2d');
+  ctx.scale(2, 2);
+  const world = fakeWorld();
+  const size = opts.size || (kind === 'fish' ? 26 : 30);
+
+  let obj;
+  if (kind === 'fish') {
+    obj = new Fish(world, PHOTO_FISH_SPECIES[speciesId]);
+    obj.tailPhase = opts.phase ?? 1.4;
+  } else {
+    obj = new Turtle(world, 0, PHOTO_TURTLE_SPECIES[speciesId]);
+    obj.state = SWIM;
+    obj.flipperPhase = opts.phase ?? 1.1;
+    obj.headBob = 0.6;
+  }
+  obj.size = size;
+  obj.angle = opts.angle ?? 0;
+  obj.x = 123; obj.y = 78;
+
+  obj.draw(ctx);
+  return cv;
+}
+
+function chip(label, hex) {
+  const d = document.createElement('span');
+  d.className = 'chip';
+  d.innerHTML = `<i class="dot" style="background:${hex}"></i>${label} ${hex}`;
+  return d;
+}
+
+function card(kind, sp, sourceLabel) {
+  const wrap = document.createElement('div');
+  wrap.className = 'card';
+  const cv = drawCreature(kind, sp.id);
+  wrap.appendChild(cv);
+
+  const nm = document.createElement('div');
+  nm.className = 'name';
+  nm.textContent = sp.label;
+  wrap.appendChild(nm);
+
+  const mt = document.createElement('div');
+  mt.className = 'meta';
+  mt.textContent = `${kind === 'fish' ? '鱼' : '龟'} · ${sp.id} · 来源 ${sourceLabel}`;
+  wrap.appendChild(mt);
+
+  const chips = document.createElement('div');
+  chips.className = 'chips';
+  const keys = kind === 'fish'
+    ? ['body', 'belly', 'fin']
+    : ['shell', 'shellLight', 'head', 'limb', 'markColor'];
+  keys.forEach((k) => { if (sp[k]) chips.appendChild(chip(k, sp[k])); });
+  wrap.appendChild(chips);
+
+  // 乌龟额外给出几张不同动画相位，确认逐帧可用
+  if (kind === 'turtle') {
+    const fr = document.createElement('div');
+    fr.className = 'frames';
+    [0, 0.8, 1.6, 2.4, 3.2].forEach((ph) => {
+      const c = document.createElement('canvas');
+      c.width = 76 * 2; c.height = 76 * 2;
+      const cx = c.getContext('2d');
+      cx.scale(2, 2);
+      const world = fakeWorld();
+      const t = new Turtle(world, 0, PHOTO_TURTLE_SPECIES[sp.id]);
+      t.size = 22; t.angle = 0; t.state = SWIM;
+      t.x = 38; t.y = 38;
+      t.flipperPhase = ph; t.headBob = ph;
+      t.draw(cx);
+      fr.appendChild(c);
+    });
+    wrap.appendChild(fr);
+  }
+  return wrap;
+}
+
+const root = document.getElementById('root');
+const fishList = Object.values(PHOTO_FISH_SPECIES || {});
+const turtleList = Object.values(PHOTO_TURTLE_SPECIES || {});
+
+function section(title, list, kind, srcMap) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  root.appendChild(h);
+  if (!list.length) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.textContent = '（无）';
+    root.appendChild(e);
+    return;
+  }
+  const g = document.createElement('div');
+  g.className = 'grid';
+  list.forEach((sp) => g.appendChild(card(kind, sp, srcMap[sp.id] || '-')));
+  root.appendChild(g);
+}
+
+const fishSrc = {}, turtleSrc = {};
+Object.values(PHOTO_FISH_SPECIES || {}).forEach((s) => { fishSrc[s.id] = s._photo || '-'; });
+Object.values(PHOTO_TURTLE_SPECIES || {}).forEach((s) => { turtleSrc[s.id] = s._photo || '-'; });
+
+section('乌龟（水龟 / 半水龟 / 陆龟 / 沼泽龟）', turtleList, 'turtle', turtleSrc);
+section('鱼', fishList, 'fish', fishSrc);
+
+// 供自动化截图脚本读取
+window.__atlasReady = true;
+window.__atlasCount = { fish: fishList.length, turtle: turtleList.length };
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# ── 大体积安装包（不入库）──
+_downloads/
+
+# ── Python 虚拟环境 ──
+.venv/
+__pycache__/
+*.pyc
+
+# ── WorkBuddy 会话数据 ──
+.workbuddy/
+
+# ── 临时与调试产物 ──
+_shot.png
+_*.png
+_*.txt
+_*.log
+_*.html.bak
+
+# ── 编辑器与系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
