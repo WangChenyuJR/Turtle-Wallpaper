@@ -62,6 +62,40 @@ export const CONFIG = {
     amountPerPellet: 26,   // 每颗恢复的饱食度
   },
 
+  // ── 天气（阶段 5-⑤）──────────────────────────────────
+  weather: {
+    enabled: true,
+    rainFoodDropInterval: 4,   // 雨天每隔几秒"雨水冲落"一颗天然食物
+  },
+
+  // ── 生命与死亡（阶段 5-⑥）────────────────────────────
+  life: {
+    fishMaxAge: [7200, 10800],      // 鱼寿命 2~3 小时（秒）
+    turtleMaxAge: [14400, 21600],   // 龟寿命 4~6 小时
+    fishStarveDeath: 90,            // 鱼饥饿满格持续 90s 饿死
+    turtleStarveDeath: 240,         // 龟饿死时长
+    dyingDuration: 2.5,             // 死亡动画秒数（翻肚漂浮渐隐）
+    archiveCap: 200,                // 生命档案上限（FIFO）
+    persist: true,                  // localStorage 持久化
+  },
+
+  // ── 分解者（阶段 5-⑦）────────────────────────────────
+  scavengers: {
+    snails: 6,             // 螺蛳数量（岸边/水底，清理遗骸）
+    shrimps: 8,            // 小虾数量（水中，吃沉底食物）
+    snailSpeed: 3.2,
+    shrimpBurst: 90,       // 虾弹射速度
+    remainsDecay: 75,      // 遗骸自然分解秒数（被吃更快）
+  },
+
+  // ── 昼夜循环（阶段 5-④）──────────────────────────────
+  daynight: {
+    enabled: true,
+    dayLength: 480,        // 一天 = 480 秒（8 分钟）
+    startT: 0.18,          // 开局时刻（0~1，0.18≈上午）
+    nightFishSpeed: 0.55,  // 夜晚鱼速度倍率下限
+  },
+
   // ── 成长与繁殖（阶段 5-③）────────────────────────────
   growth: {
     fishMaturityAge: 100,      // 鱼成熟秒数（幼苗→成年）

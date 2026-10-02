@@ -211,6 +211,91 @@ export const TURTLE_SPECIES = {
     waterBias: 0.15,
     weight: 1,
   },
+  // ── 新增：用户指定必选品种（水彩图已就位 assets/creatures/turtle/）──
+  yellowthroat: {
+    id: 'yellowthroat',
+    label: '黄喉拟水龟',
+    habitat: 'semi',         // 半水龟：多在水中，晴天上岸晒壳
+    shell: '#7a6a3a',
+    limb: '#5f5230',
+    head: '#8a8040',
+    pattern: 'lines',
+    markColor: '#e8d24e',    // 头侧镶黑边淡黄纵纹
+    sizeScale: 1.0,
+    speedScale: 1.0,
+    weight: 2,
+  },
+  helmetedSideNeck: {
+    id: 'helmetedSideNeck',
+    label: '沼泽侧颈龟',
+    habitat: 'semi',         // 侧颈类：头部侧弯缩入（动画点）
+    shell: '#6b5340',
+    limb: '#584432',
+    head: '#7a6550',
+    pattern: 'smooth',
+    markColor: '#d8c9a0',
+    sizeScale: 1.0,
+    speedScale: 0.95,
+    weight: 2,
+    sideNeck: true,
+  },
+  caramelSlider: {
+    id: 'caramelSlider',
+    label: '焦糖巴西龟',
+    habitat: 'semi',         // 巴西龟焦糖色变异，习性同巴西
+    shell: '#c99a5b',
+    limb: '#a87c46',
+    head: '#c49a58',
+    pattern: 'rings',
+    markColor: '#e8a94e',    // 淡化橘黄耳斑
+    sizeScale: 1.0,
+    speedScale: 1.0,
+    weight: 1,
+  },
+  goldLineReeves: {
+    id: 'goldLineReeves',
+    label: '金线草龟',
+    habitat: 'semi',         // 草龟金线色型
+    shell: '#5a4a2e',
+    limb: '#463a24',
+    head: '#514327',
+    pattern: 'lines',
+    markColor: '#e6c04e',    // 金黄线条
+    sizeScale: 1.05,
+    speedScale: 1.0,
+    weight: 1,
+  },
+  redbellySideNeck: {
+    id: 'redbellySideNeck',
+    label: '圆澳侧颈龟',
+    habitat: 'aquatic',      // 水龟：对水依赖强，幼体腹甲猩红
+    shell: '#8a4a3a',
+    limb: '#6e3d30',
+    head: '#7a503f',
+    pattern: 'smooth',
+    markColor: '#e0735a',
+    sizeScale: 1.0,
+    speedScale: 1.0,
+    baskingChance: 0.22,
+    baskDuration: [6, 12],
+    weight: 2,
+    sideNeck: true,
+  },
+  terrapin: {
+    id: 'terrapin',
+    label: '北部钻纹龟',
+    habitat: 'aquatic',      // 咸水龟（特例）：背甲同心钻纹
+    shell: '#6e6a5a',
+    limb: '#726a58',
+    head: '#8a8470',
+    pattern: 'rings',
+    markColor: '#cfc08a',
+    sizeScale: 0.95,
+    speedScale: 1.0,
+    baskingChance: 0.35,
+    baskDuration: [8, 14],
+    weight: 2,
+  },
 };
 
 // ── habitat 预设参数（品种未显式指定时采用）──────────────
@@ -267,6 +352,7 @@ export const DEFAULT_POPULATION = {
   turtle: {
     redear: 1,
     chinese: 1,
+    yellowthroat: 1,   // 用户指定必选品种，默认入塘
   },
 };
 // ══════════════════════════════════════════════════════════

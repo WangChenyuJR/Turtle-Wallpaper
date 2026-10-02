@@ -21,3 +21,7 @@ _*.html.bak
 .idea/
 .DS_Store
 Thumbs.db
+
+# ── 测试输出与调试探针 ──
+_test_*_out.html
+_probe.html

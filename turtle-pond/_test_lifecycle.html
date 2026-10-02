@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>阶段5-⑤⑥⑦ 天气/生命档案/分解者 测试（简化）</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { CONFIG } from './src/config.js';
+    import { Weather } from './src/weather.js';
+    import { Remains, Snail, Shrimp } from './src/scavengers.js';
+    import { Food } from './src/food.js';
+
+    setTimeout(() => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+
+      // 保存现场，结束时恢复
+      const saved = {
+        fishMaxAge: CONFIG.life.fishMaxAge,
+        turtleMaxAge: CONFIG.life.turtleMaxAge,
+        fishStarveDeath: CONFIG.life.fishStarveDeath,
+        turtleStarveDeath: CONFIG.life.turtleStarveDeath,
+        rainFoodDropInterval: CONFIG.weather.rainFoodDropInterval,
+      };
+      try {
+        const app = window.pondApp;
+        const W = app.world;
+
+        // ── 1. 天气（⑤）────────────────────────────────
+        const w = app.weather;
+        ok(w && w.state === 'sunny', '天气系统已挂载，初始晴天');
+        ok(w.set('bogus') === false, '非法天气名被拒绝');
+        w.set('rain');
+        for (let i = 0; i < 10; i++) app._update(0.05, i * 0.05);
+        ok(w.state === 'rain' && w.drops.length > 0, `切雨后雨滴生成（${w.drops.length} 滴）`);
+
+        // 雨天天然投喂回调已接通
+        CONFIG.weather.rainFoodDropInterval = 0.05;
+        const beforeFood = app.food.aliveCount;
+        for (let i = 0; i < 60; i++) app._update(0.05, 1 + i * 0.05);
+        ok(app.food.aliveCount > beforeFood, '雨天"雨水冲落"天然食物已进池塘');
+        CONFIG.weather.rainFoodDropInterval = saved.rainFoodDropInterval;
+        w.set('sunny');
+
+        // ── 2. 生命档案（⑥）────────────────────────────
+        const arc = app.archive;
+        ok(arc && typeof arc.count === 'function', '生命档案已挂载');
+        const baseCount = arc.count();
+        const fake = {
+          kind: 'fish', species: { label: '测试鲤' }, generation: 3, birth: 100,
+          deathCause: 'starve',
+          profile: () => ({ eaten: 5, offspring: 2, size: 9.5 }),
+        };
+        const entry = arc.add(fake, 166);
+        ok(arc.count() === baseCount + 1, '快照入档 +1');
+        ok(entry.name && entry.age === 66 && entry.cause === 'starve' && entry.gen === 3,
+          `档案字段完整（${entry.name}，享年66s，饿死，第3代）`);
+
+        // 鱼老死 → 动画 → 收殓 → 遗骸
+        CONFIG.life.fishMaxAge = [0.1, 0.1];
+        app.addFish(1, 'koi');
+        const f0 = app.fishes[app.fishes.length - 1];
+        f0.maxAge = 0.1; f0.age = 0.2;
+        const fishN = app.fishes.length;
+        for (let i = 0; i < 80; i++) app._update(0.05, 10 + i * 0.05);
+        ok(f0.dying && f0.deathCause === 'old', '鱼到寿触发 dying（寿终正寝）');
+        ok(f0.dead && app.fishes.length === fishN - 1, '动画结束自动收殓移除');
+        ok(app.remains.length > 0 && app.archive.count() === baseCount + 2,
+          '入档案 +2 且留下遗骸');
+        const p0 = f0.profile();
+        ok(typeof p0.eaten === 'number' && typeof p0.offspring === 'number',
+          'profile() 快照含 eaten/offspring/size');
+
+        // 饿死路径
+        CONFIG.life.fishMaxAge = saved.fishMaxAge;
+        CONFIG.life.fishStarveDeath = 0.15;
+        app.addFish(1, 'whitebait');
+        const f1 = app.fishes[app.fishes.length - 1];
+        f1.hunger = 1;
+        for (let i = 0; i < 30; i++) app._update(0.05, 20 + i * 0.05);
+        ok(f1.dying && f1.deathCause === 'starve', '饥饿满格持续后饿死');
+        CONFIG.life.fishStarveDeath = saved.fishStarveDeath;
+
+        // 龟到寿
+        CONFIG.life.turtleMaxAge = [0.1, 0.1];
+        app.addTurtle('redear');
+        const t0 = app.turtles[app.turtles.length - 1];
+        t0.maxAge = 0.1; t0.age = 0.2;
+        for (let i = 0; i < 30; i++) app._update(0.05, 30 + i * 0.05);
+        ok(t0.dying && t0.deathCause === 'old', '龟到寿触发 dying');
+        CONFIG.life.turtleMaxAge = saved.turtleMaxAge;
+
+        // ── 3. 分解者（⑦）──────────────────────────────
+        const sc = app.scavengers;
+        ok(sc.snails.length === CONFIG.scavengers.snails
+          && sc.shrimps.length === CONFIG.scavengers.shrimps,
+          `螺蛳${sc.snails.length}只/虾${sc.shrimps.length}只常驻`);
+
+        // 遗骸自然分解
+        const r = new Remains(W, 'fish', 8, W.w / 2, W.h / 2);
+        r.update(CONFIG.scavengers.remainsDecay + 1);
+        ok(r.gone, '遗骸自然分解至消失');
+
+        // 螺蛳啃食加速
+        const r2 = new Remains(W, 'fish', 8, W.w / 2, W.h / 2);
+        r2.nibble(0.5);
+        ok(Math.abs(r2.decay - 0.5) < 0.01 && r2.eatenBits === 1, 'nibble() 计数与衰减正确');
+
+        // 虾吃沉底食物
+        const sh = new Shrimp(W);
+        const bottom = W.marshLineAt(sh.x) - 8;
+        const fd = new Food(sh.x, bottom);
+        fd.x = sh.x; fd.y = bottom; fd.eaten = false;
+        for (let i = 0; i < 20 && !fd.eaten; i++) sh.update(0.05, [fd]);
+        ok(fd.eaten, '虾捡食沉底食物');
+
+        // ── 4. 长跑稳定性 ──────────────────────────────
+        w.set('rain');
+        let crashed = false;
+        try { for (let i = 0; i < 600; i++) app._update(0.05, 100 + i * 0.05); }
+        catch (e) { crashed = true; log.push(e.message); }
+        ok(!crashed && app.fishes.every(f => isFinite(f.x) && isFinite(f.y)),
+          '雨天长跑 30s 无异常');
+
+        log.push('');
+        log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+      } finally {
+        Object.assign(CONFIG.life, {
+          fishMaxAge: saved.fishMaxAge,
+          turtleMaxAge: saved.turtleMaxAge,
+          fishStarveDeath: saved.fishStarveDeath,
+          turtleStarveDeath: saved.turtleStarveDeath,
+        });
+        CONFIG.weather.rainFoodDropInterval = saved.rainFoodDropInterval;
+      }
+      document.getElementById('report').textContent = log.join('\n');
+      window.__TEST_DONE__ = true;
+    }, 600);
+  </script>
+</body>
+</html>

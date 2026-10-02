@@ -79,6 +79,21 @@ export class Turtle {
     this.decisionTimer = rand(3, 8);
     // 繁殖（阶段 5-③）
     this.reproCooldown = opts.baby ? G.turtleReproCooldown : rand(0, G.turtleReproCooldown * 0.5);
+
+    // ── 生命周期（阶段 5-⑥）──────────────────────────
+    this.kind = 'turtle';
+    this.dead = false;
+    this.generation = opts.generation ?? 1;      // 世代：初始种群=1，后代+1
+    this.birth = opts.birth ?? 0;                // 出生时刻（水塘内秒）
+    const maxAge = CONFIG.life?.turtleMaxAge ?? [14400, 21600];
+    this.maxAge = rand(maxAge[0], maxAge[1]);
+    this.eaten = 0;                              // 吃食计数（档案统计）
+    this.offspring = 0;                          // 产蛋窝数（主循环回填）
+    // 死亡流程：dying（水中翻肚上浮/岸上静卧渐隐）→ dead（等待收殓入档）
+    this.dying = false;
+    this.dyingTimer = 0;
+    this.deathCause = null;
+    this.starveTimer = 0;
   }
 
   /** 是否成年 */
@@ -91,6 +106,9 @@ export class Turtle {
     const G = CONFIG.growth;
     this.age += dt;
     this.reproCooldown = Math.max(0, this.reproCooldown - dt);
+    // 寿终正寝（阶段 5-⑥）
+    if (!this.dying && this.age >= this.maxAge) this.startDeath('old');
+    if (this.dying) return;
     if (!this.isAdult) {
       const t = Math.min(1, this.age / G.turtleMaturityAge);
       this.size = this.adultSize * (G.babySizeRatio + (1 - G.babySizeRatio) * t);
@@ -121,13 +139,23 @@ export class Turtle {
     return best ? { food: best, d: Math.sqrt(bestD) } : null;
   }
 
-  update(dt, foods, cursor, turtles) {
+  update(dt, foods, cursor, turtles, env = { light: 1, isNight: false }) {
     const T = CONFIG.turtle;
     // 成长（年龄/体型/繁殖冷却）
     this._grow(dt);
+    // ── 死亡动画优先（阶段 5-⑥）────────────────────
+    if (this.dying) { this._updateDying(dt); return; }
     this.stateTime += dt;
     this.decisionTimer -= dt;
     this.hunger = clamp(this.hunger + T.hungerDecay * dt, 0, 1);
+
+    // 饿死计时：饥饿满格持续 turtleStarveDeath 秒
+    if (this.hunger >= 1) {
+      this.starveTimer += dt;
+      if (this.starveTimer >= (CONFIG.life?.turtleStarveDeath ?? 240)) this.startDeath('starve');
+    } else {
+      this.starveTimer = 0;
+    }
 
     const W = this.world;
     const inWater = W.isWater(this.x, this.y);
@@ -141,8 +169,9 @@ export class Turtle {
           this.state = STATE.SEEK_FOOD;
           this.stateTime = 0;
         } else if (this.decisionTimer <= 0 && (inWater || this._isLandLover())) {
-          // 按 habitat 决定"是否上岸"（陆龟几乎必上，水龟几乎不上）
-          if (Math.random() < this.behavior.baskingChance) {
+          // 按 habitat 决定"是否上岸"（陆龟几乎必上，水龟几乎不上；夜晚/雨天不晒背）
+          const nightFactor = env.isNight ? 0 : (env.rain ? 0.15 : 1);
+          if (Math.random() < this.behavior.baskingChance * nightFactor) {
             this._pickBaskTarget();
             this.state = STATE.CLIMB_OUT;
           }
@@ -171,6 +200,7 @@ export class Turtle {
         this._moveToward(target.food.x, target.food.y, dt, T.swimSpeed * 1.3);
         if (target.d < T.eatRadius) {
           target.food.eat();
+          this.eaten++;
           this.hunger = clamp(this.hunger - CONFIG.food.amountPerPellet / 100, 0, 1);
           this.state = STATE.SWIM;
         }
@@ -193,14 +223,16 @@ export class Turtle {
         // 路过的食物顺手吃掉
         if (target && target.d < T.eatRadius + 4) {
           target.food.eat();
+          this.eaten++;
           this.hunger = clamp(this.hunger - CONFIG.food.amountPerPellet / 100, 0, 1);
         }
         break;
       }
 
       case STATE.BASK: {
-        // 岸上缓慢爬行 + 晒太阳（时长按品种）
-        if (this.stateTime > (this._baskGoal ?? rand(6, 14))) {
+        // 岸上缓慢爬行 + 晒太阳（时长按品种；夜晚缩短晒背提前回水）
+        const goal = this._baskGoal ?? rand(6, 14);
+        if (this.stateTime > (env.isNight ? goal * 0.3 : goal)) {
           this.state = STATE.RETURN;
           this.stateTime = 0;
         } else {
@@ -340,6 +372,34 @@ export class Turtle {
     this.angle += dd * Math.min(1, dt * 5);
   }
 
+  // ── 生命周期（阶段 5-⑥）────────────────────────────
+  /** 进入死亡流程：cause = 'old' | 'starve' */
+  startDeath(cause = 'old') {
+    if (this.dying || this.dead) return;
+    this.dying = true;
+    this.deathCause = cause;
+    this.dyingTimer = CONFIG.life?.dyingDuration ?? 2.5;
+  }
+
+  /** 死亡动画：水中翻肚上浮 / 岸上静卧，渐隐 */
+  _updateDying(dt) {
+    this.dyingTimer -= dt;
+    if (this.world.isWater(this.x, this.y)) {
+      const surface = this.world.bankLineAt(this.x) + 14;
+      this.y += (surface - this.y) * Math.min(1, dt * 0.7);
+    }
+    if (this.dyingTimer <= 0) this.dead = true;
+  }
+
+  /** 一生快照（写入生命档案） */
+  profile() {
+    return {
+      eaten: this.eaten,
+      offspring: this.offspring,
+      size: Math.round(this.adultSize * 10) / 10,
+    };
+  }
+
   /** 动画帧序号（供导出脚本逐帧截图识别） */
   get animFrame() {
     return Math.round(Math.abs(this.flipperPhase) * 3);
@@ -351,10 +411,16 @@ export class Turtle {
     const flatScale = sp.flat ? 0.82 : 1;
 
     ctx.save();
+    // 死亡渐隐（阶段 5-⑥）
+    if (this.dying) {
+      const D = CONFIG.life?.dyingDuration ?? 2.5;
+      ctx.globalAlpha = clamp(this.dyingTimer / (D * 0.45), 0, 1);
+    }
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
 
-    const paddling = this.state === STATE.SWIM || this.state === STATE.SEEK_FOOD;
+    const paddling = !this.dying
+      && (this.state === STATE.SWIM || this.state === STATE.SEEK_FOOD);
     const legSwing = paddling
       ? Math.sin(this.flipperPhase) * 0.5
       : Math.sin(this.flipperPhase * 0.5) * 0.22;
@@ -424,7 +490,7 @@ export class Turtle {
     ctx.restore();
 
     // 晒背标记（岸边时头顶小太阳）
-    if (this.state === STATE.BASK) {
+    if (this.state === STATE.BASK && !this.dying) {
       ctx.save();
       ctx.globalAlpha = 0.5 + 0.2 * Math.sin(this.headBob * 2);
       ctx.fillStyle = '#ffe9a8';

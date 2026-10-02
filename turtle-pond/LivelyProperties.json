@@ -50,6 +50,24 @@
     "text": "显示植物（睡莲/芦苇/水草）",
     "value": true
   },
+  "daynightEnabled": {
+    "type": "checkbox",
+    "text": "昼夜循环（8分钟一天）",
+    "value": true
+  },
+  "dayLength": {
+    "type": "slider",
+    "text": "一天时长（秒）",
+    "value": 480,
+    "min": 60,
+    "max": 1800,
+    "step": 30
+  },
+  "weatherEnabled": {
+    "type": "checkbox",
+    "text": "天气系统（晴/小雨/雨后）",
+    "value": true
+  },
   "species": {
     "_comment": "品种配置：key=品种 id，value=数量。改这里即可自定义水塘物种组成。",
     "fish": {

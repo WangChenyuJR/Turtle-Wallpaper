@@ -48,6 +48,20 @@ export class Fish {
     this.dead = false;
     // 繁殖
     this.reproCooldown = opts.baby ? G.fishReproCooldown : rand(0, G.fishReproCooldown);
+
+    // ── 生命周期（阶段 5-⑥）──────────────────────────
+    this.kind = 'fish';
+    this.generation = opts.generation ?? 1;      // 世代：初始种群=1，后代+1
+    this.birth = opts.birth ?? 0;                // 出生时刻（水塘内秒）
+    const maxAge = CONFIG.life?.fishMaxAge ?? [7200, 10800];
+    this.maxAge = rand(maxAge[0], maxAge[1]);
+    this.eaten = 0;                              // 吃食计数（档案统计）
+    this.offspring = 0;                          // 繁殖后代数（主循环回填）
+    // 死亡流程：dying（翻肚漂浮渐隐）→ dead（等待主循环收殓入档）
+    this.dying = false;
+    this.dyingTimer = 0;
+    this.deathCause = null;
+    this.starveTimer = 0;
   }
 
   /** 依当前体型换算速度（成长时体型变化需重算） */
@@ -55,6 +69,8 @@ export class Fish {
     this.maxSpeed = CONFIG.fish.maxSpeed
       * (1.25 - (this.size / CONFIG.fish.maxSize) * 0.5)
       * (this.species.speedScale ?? 1);
+    // 幼鱼更灵活（小而快，逃生加成）
+    if (!this.isAdult) this.maxSpeed *= CONFIG.growth.fryEscapeSpeed ?? 1;
   }
 
   /** 是否成年 */
@@ -67,6 +83,9 @@ export class Fish {
     const G = CONFIG.growth;
     this.age += dt;
     this.reproCooldown = Math.max(0, this.reproCooldown - dt);
+    // 寿终正寝（阶段 5-⑥）
+    if (!this.dying && this.age >= this.maxAge) this.startDeath('old');
+    if (this.dying) return;
     if (!this.isAdult) {
       const t = Math.min(1, this.age / G.fishMaturityAge);
       // 幼年→成年平滑过渡
@@ -93,7 +112,7 @@ export class Fish {
     const sep2 = F.separation * F.separation;
 
     for (const o of fishes) {
-      if (o === this || o.dead) continue;
+      if (o === this || o.dead || o.dying) continue;
       const d2 = dist2(this.x, this.y, o.x, o.y);
       if (d2 > perc2 || d2 === 0) continue;
 
@@ -169,6 +188,7 @@ export class Fish {
       // 够近就吃掉
       if (d < F.eatRadius + this.size * 0.3) {
         target.eat();
+        this.eaten++;
         this.hunger = clamp(this.hunger - CONFIG.food.amountPerPellet / 100, 0, 1);
         this.size = Math.min(this.size + 0.06, CONFIG.fish.maxSize + 6);
       }
@@ -179,7 +199,9 @@ export class Fish {
     this.vy += ay * dt;
 
     const sp = Math.hypot(this.vx, this.vy);
-    const maxSp = this.maxSpeed * (0.75 + this.hunger * 0.6);
+    // 光强影响活跃度（夜晚变慢）；幼鱼有逃生加成（含在 maxSpeed 里）
+    const light = this.lightLevel ?? 1;
+    const maxSp = this.maxSpeed * (0.75 + this.hunger * 0.6) * (0.6 + 0.4 * light);
     if (sp > maxSp) {
       this.vx = (this.vx / sp) * maxSp;
       this.vy = (this.vy / sp) * maxSp;
@@ -197,6 +219,17 @@ export class Fish {
   update(dt) {
     // 成长（年龄/体型/繁殖冷却）
     this._grow(dt);
+
+    // ── 死亡动画优先（阶段 5-⑥）────────────────────
+    if (this.dying) { this._updateDying(dt); return; }
+
+    // 饿死计时：饥饿满格持续 fishStarveDeath 秒
+    if (this.hunger >= 1) {
+      this.starveTimer += dt;
+      if (this.starveTimer >= (CONFIG.life?.fishStarveDeath ?? 90)) this.startDeath('starve');
+    } else {
+      this.starveTimer = 0;
+    }
 
     this.x += this.vx * dt;
     this.y += this.vy * dt;
@@ -218,6 +251,33 @@ export class Fish {
     }
   }
 
+  // ── 生命周期（阶段 5-⑥）────────────────────────────
+  /** 进入死亡流程：cause = 'old' | 'starve' */
+  startDeath(cause = 'old') {
+    if (this.dying || this.dead) return;
+    this.dying = true;
+    this.deathCause = cause;
+    this.dyingTimer = CONFIG.life?.dyingDuration ?? 2.5;
+  }
+
+  /** 死亡动画：翻肚缓缓浮向水面，渐隐 */
+  _updateDying(dt) {
+    this.dyingTimer -= dt;
+    const surface = this.world.bankLineAt(this.x) + 12;
+    this.y += (surface - this.y) * Math.min(1, dt * 0.9);
+    this.x += Math.sin(this.dyingTimer * 2.4) * 6 * dt;
+    if (this.dyingTimer <= 0) this.dead = true;
+  }
+
+  /** 一生快照（写入生命档案） */
+  profile() {
+    return {
+      eaten: this.eaten,
+      offspring: this.offspring,
+      size: Math.round(this.adultSize * 10) / 10,
+    };
+  }
+
   /** 动画帧序号（供导出脚本逐帧截图识别） */
   get animFrame() {
     return Math.round(Math.abs(this.tailPhase) * 3);
@@ -233,10 +293,16 @@ export class Fish {
     ctx.translate(this.x, this.y);
     ctx.rotate(this.angle);
 
-    // 幼苗更透亮
-    if (baby) ctx.globalAlpha = 0.85;
+    // 死亡渐隐（阶段 5-⑥）：停摆 + 泛白 + 淡出
+    if (this.dying) {
+      const D = CONFIG.life?.dyingDuration ?? 2.5;
+      ctx.globalAlpha = clamp(this.dyingTimer / (D * 0.45), 0, 1);
+    } else if (baby) {
+      // 幼苗更透亮
+      ctx.globalAlpha = 0.85;
+    }
 
-    const wig = Math.sin(this.tailPhase) * 0.5;
+    const wig = this.dying ? 0 : Math.sin(this.tailPhase) * 0.5;
     const tailLen = sp.fancyTail ? 1.35 : 0.95;
 
     // 尾鳍
@@ -256,6 +322,13 @@ export class Fish {
     ctx.beginPath();
     ctx.ellipse(0, 0, L * 0.5, W * 0.5, 0, 0, Math.PI * 2);
     ctx.fill();
+    // 死亡泛白（阶段 5-⑥）
+    if (this.dying) {
+      ctx.fillStyle = 'rgba(235,240,242,0.45)';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, L * 0.5, W * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // 腹部浅色高光
     if (sp.belly) {

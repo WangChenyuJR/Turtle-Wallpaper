@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>阶段5-④ 昼夜循环 测试（简化）</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { DayNight } from './src/daynight.js';
+
+    setTimeout(() => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+
+      try {
+        const app = window.pondApp;
+
+        // 1. 纯计算：时段/光强
+        const dn = new DayNight(0.2);
+        ok(dn.phase.id === 'day' && dn.light === 1, 'dayT=0.2 → 白天全亮');
+        dn.setDayT(0.8);
+        ok(dn.phase.id === 'night' && dn.isNight && dn.light < 0.3, 'dayT=0.8 → 夜晚暗光');
+        dn.setDayT(0.03);
+        ok(dn.phase.id === 'dawn' && dn.light > 0.55 && dn.light < 1, 'dayT=0.03 → 黎明过渡光');
+        dn.setDayT(0.56);
+        ok(dn.phase.id === 'dusk', 'dayT=0.56 → 黄昏');
+
+        // 2. 场景集成
+        window.pond.setTime(0.9);          // 深夜
+        for (let i = 0; i < 30; i++) app._update(0.05, i * 0.05);
+        const t1 = window.pond.time();
+        log.push(`   pond.time() = ${JSON.stringify(t1)}`);
+        ok(t1.phase === '夜晚' && t1.light < 0.3, 'pond.time() 夜晚状态正确');
+        ok(app.fishes.every(f => f.lightLevel < 1), '鱼收到夜晚减速信号');
+
+        // 3. 夜晚龟不上岸：清空重置，深水放两只半水龟跑 20 秒
+        window.pond.setPopulation({ fish: {}, turtle: { redear: 2 } });
+        for (const t of app.turtles) { t.state = 'swim'; t.decisionTimer = 0.1; }
+        for (let i = 0; i < 400; i++) app._update(0.05, i * 0.05);
+        const basking = app.turtles.filter(t => t.state === 'bask').length;
+        ok(basking === 0, `夜晚无龟上岸晒背（bask=${basking}）`);
+
+        // 4. 白天恢复活跃
+        window.pond.setTime(0.3);
+        for (let i = 0; i < 400; i++) app._update(0.05, 100 + i * 0.05);
+        const lightDay = app.fishes[0]?.lightLevel ?? 1;
+        ok(lightDay === 1, '白天鱼活跃度恢复');
+
+        // 5. 长跑稳定性
+        let crashed = false;
+        try { for (let i = 0; i < 600; i++) app._update(0.05, 200 + i * 0.05); }
+        catch (e) { crashed = true; log.push(e.message); }
+        ok(!crashed && app.fishes.every(f => isFinite(f.x)), '长跑 30s 无异常');
+
+        log.push('');
+        log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+      }
+      document.getElementById('report').textContent = log.join('\n');
+      window.__TEST_DONE__ = true;
+    }, 600);
+  </script>
+</body>
+</html>

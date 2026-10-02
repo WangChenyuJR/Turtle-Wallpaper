@@ -18,6 +18,11 @@ import { Turtle, Egg } from './turtle.js';
 import { DuckweedField } from './duckweed.js';
 import { FoodManager } from './food.js';
 import { PlantField, PLANT_SPECIES, DEFAULT_PLANTS } from './plants.js';
+import { DayNight } from './daynight.js';
+import { Weather } from './weather.js';
+import { LifeArchive, KIND_LABELS, CAUSE_LABELS } from './afterlife.js';
+import { Remains, ScavengerField } from './scavengers.js';
+import { CreaturePanel } from './panel.js';
 import {
   DEFAULT_POPULATION, FISH_SPECIES, TURTLE_SPECIES,
   pickFishSpecies, pickTurtleSpecies, listSpecies, HABITAT_LABELS,
@@ -38,6 +43,18 @@ class PondApp {
     // 植物（阶段 5-②）：岸边/浮叶/沉水三类
     this.plants = new PlantField(this.world, DEFAULT_PLANTS);
     this.plantsEnabled = CONFIG.plants?.enabled ?? true;
+    // 昼夜循环（阶段 5-④）
+    this.daynight = new DayNight(CONFIG.daynight?.startT ?? 0.15);
+    // 天气（阶段 5-⑤）
+    this.weather = new Weather();
+    this.weather.onRainFoodDrop = (x) => this.food.feed(x, this.world.bankLineAt(x) + 24, 1);
+    // 生命档案 + 遗骸 + 分解者（阶段 5-⑥⑦）
+    this.archive = new LifeArchive();
+    this.remains = [];
+    this.scavengers = new ScavengerField(this.world);
+    this.showArchive = false;
+    // 生物信息面板（点击鱼/龟查看详情/改名/三视图）
+    this.panel = new CreaturePanel(this);
     this.time = 0;
 
     this.cursor = { x: 0, y: 0, active: false };
@@ -118,9 +135,10 @@ class PondApp {
     });
     window.addEventListener('mouseleave', () => { this.cursor.active = false; });
 
-    // 左键投喂
+    // 左键：先看是否点中生物（打开信息面板），点空白则投喂
     window.addEventListener('mousedown', (e) => {
       if (e.button === 0) {
+        if (this.panel.handleCanvasClick(e.clientX, e.clientY)) return;
         this.food.feed(e.clientX, e.clientY);
       } else if (e.button === 2) {
         this.showHelp = !this.showHelp;
@@ -156,6 +174,24 @@ class PondApp {
           break;
         case 'p':
           this.plantsEnabled = !this.plantsEnabled;
+          break;
+        case 'n':
+          // 时间快进开关（×25），观赏昼夜交替用
+          this.daynight.speed = this.daynight.speed > 1 ? 1 : 25;
+          break;
+        case 'w': {
+          // 手动切换天气：晴 → 雨 → 雨后 → 晴
+          const order = ['sunny', 'rain', 'afterRain'];
+          const next = order[(order.indexOf(this.weather.state) + 1) % order.length];
+          this.weather.set(next);
+          break;
+        }
+        case 'o':
+          // 生命档案面板
+          this.showArchive = !this.showArchive;
+          break;
+        case 'escape':
+          this.panel.close();
           break;
         // 数字键 1~6 → 按品种添加鱼
         case '1': case '2': case '3': case '4': case '5': case '6': {
@@ -255,6 +291,7 @@ class PondApp {
     this.fishes.length = 0;
     this.turtles.length = 0;
     this.eggs.length = 0;
+    this.remains.length = 0;
     this._initScene(pop);
   }
 
@@ -305,6 +342,7 @@ class PondApp {
     if (!this.paused && this.visible) {
       this._update(dt, now / 1000);
     }
+    this.panel.tick(dt);
     this._render(now / 1000);
 
     requestAnimationFrame((t) => this._loop(t));
@@ -312,20 +350,43 @@ class PondApp {
 
   _update(dt, time) {
     this.time = time;
-    // 鱼群先算行为（需要彼此信息）
+    // 昼夜推进
+    if (CONFIG.daynight?.enabled) this.daynight.update(dt);
+    const light = CONFIG.daynight?.enabled ? this.daynight.light : 1;
+    const env = {
+      light,
+      isNight: CONFIG.daynight?.enabled ? this.daynight.isNight : false,
+      rain: CONFIG.weather?.enabled ? this.weather.state === 'rain' : false,
+    };
+
+    // 天气推进（阶段 5-⑤）
+    if (CONFIG.weather?.enabled) this.weather.update(dt, this.world);
+
+    // 鱼群先算行为（需要彼此信息；夜晚变慢；濒死鱼不参与）
     const plantRef = this.plantsEnabled ? this.plants : null;
+    const fishLight = Math.max(CONFIG.daynight?.nightFishSpeed ?? 0.55, light);
     for (const f of this.fishes) {
-      f.flock(this.fishes, this.cursor, this.food.items, dt, plantRef);
+      f.lightLevel = fishLight;
+      if (!f.dying) f.flock(this.fishes, this.cursor, this.food.items, dt, plantRef);
     }
     for (const f of this.fishes) f.update(dt);
 
-    // 乌龟
+    // 乌龟（夜晚不上岸、岸上加速回水）
     for (const t of this.turtles) {
-      t.update(dt, this.food.items, this.cursor, this.turtles);
+      t.update(dt, this.food.items, this.cursor, this.turtles, env);
     }
 
     // 食物
     this.food.update(dt);
+
+    // ── 死亡结算（阶段 5-⑥）：入档案 + 留遗骸 + 移除 ──
+    this._reapDead();
+
+    // ── 分解者（阶段 5-⑦）：螺蛳啃遗骸 / 虾吃沉底食物 ──
+    this.scavengers.update(dt, this.remains, this.food.items);
+    for (let i = this.remains.length - 1; i >= 0; i--) {
+      if (this.remains[i].gone) this.remains.splice(i, 1);
+    }
 
     // ── 繁殖系统（阶段 5-③）──────────────────────────
     this._reproduce(dt);
@@ -348,13 +409,13 @@ class PondApp {
     // ── 鱼：成对繁殖 ─────────────────────────────────
     if (this.fishes.length < G.fishCap) {
       for (const f of this.fishes) {
-        if (!f.isAdult || f.hunger > G.reproHungerMax || f.reproCooldown > 0) continue;
+        if (!f.isAdult || f.dying || f.hunger > G.reproHungerMax || f.reproCooldown > 0) continue;
         // 每秒约 fishReproChance 的概率（按 dt 折算到帧）
         if (Math.random() > G.fishReproChance * dt) continue;
         // 找同种成年邻居
         let mate = null;
         for (const o of this.fishes) {
-          if (o === f || !o.isAdult || o.hunger > G.reproHungerMax) continue;
+          if (o === f || !o.isAdult || o.dying || o.hunger > G.reproHungerMax) continue;
           if (o.species.id !== f.species.id) continue;
           if (dist2(f.x, f.y, o.x, o.y) < 46 * 46) { mate = o; break; }
         }
@@ -370,6 +431,7 @@ class PondApp {
         }
         f.reproCooldown = G.fishReproCooldown;
         mate.reproCooldown = G.fishReproCooldown;
+        f.offspring = (f.offspring ?? 0) + fryN;    // 生命档案统计用
         // 消耗体力
         f.hunger = Math.min(1, f.hunger + 0.22);
         mate.hunger = Math.min(1, mate.hunger + 0.22);
@@ -398,15 +460,43 @@ class PondApp {
     }
   }
 
+  // ── 生命周期（阶段 5-⑥）──────────────────────────────
+  /** 收殓死亡生物：写入生命档案 → 留下遗骸 → 从池塘移除 */
+  _reapDead() {
+    for (let i = this.fishes.length - 1; i >= 0; i--) {
+      const f = this.fishes[i];
+      if (!f.dead) continue;
+      this.archive.add(f, this.time);
+      this._spawnRemains('fish', f.size, f.x, f.y);
+      this.fishes.splice(i, 1);
+    }
+    for (let i = this.turtles.length - 1; i >= 0; i--) {
+      const t = this.turtles[i];
+      if (!t.dead) continue;
+      this.archive.add(t, this.time);
+      this._spawnRemains('turtle', t.size, t.x, t.y, !this.world.isWater(t.x, t.y));
+      this.turtles.splice(i, 1);
+    }
+  }
+
+  /** 留下遗骸：水里沉底，岸上（龟）原地 */
+  _spawnRemains(kind, size, x, y, onLand = false) {
+    this.remains.push(new Remains(this.world, kind, size, x, y, onLand ? y : null));
+  }
+
   _render(time) {
     const ctx = this.ctx;
     const { w, h } = this.world;
 
     ctx.clearRect(0, 0, w, h);
 
-    // 背景天空（岸边之上）
-    ctx.fillStyle = CONFIG.colors.sky;
-    ctx.fillRect(0, 0, w, this.world.bankY);
+    // 背景天空（岸边之上）—— 昼夜循环接管
+    if (CONFIG.daynight?.enabled) {
+      this.daynight.drawSky(ctx, this.world);
+    } else {
+      ctx.fillStyle = CONFIG.colors.sky;
+      ctx.fillRect(0, 0, w, this.world.bankY);
+    }
 
     // 场景三区
     this.world.draw(ctx, time);
@@ -428,18 +518,40 @@ class PondApp {
     // 食物
     this.food.draw(ctx);
 
+    // 遗骸 + 螺蛳（水底层，阶段 5-⑦）
+    for (const r of this.remains) r.draw(ctx, time);
+    this.scavengers.draw(ctx, time, 'bottom');
+
     // 生物
     for (const t of this.turtles) t.draw(ctx);
     for (const f of this.fishes) f.draw(ctx);
+
+    // 小虾（水中层，阶段 5-⑦）
+    this.scavengers.draw(ctx, time, 'top');
 
     // 3) 水面浮叶（睡莲/荷花）—— 画在生物之上，形成遮罩层次
     if (this.plantsEnabled) {
       this.plants.drawLayer(ctx, time, 'surface');
     }
 
+    // 昼夜色罩（全屏氛围光，在 HUD 之前）
+    if (CONFIG.daynight?.enabled) {
+      this.daynight.drawOverlay(ctx, this.world);
+    }
+
+    // 天气色罩 + 雨丝（阶段 5-⑤，在昼夜罩之上）
+    if (CONFIG.weather?.enabled) {
+      this.weather.drawTint(ctx, this.world);
+      this.weather.drawRain(ctx, this.world);
+    }
+
+    // 选中生物的高亮呼吸圈（跟随游动）
+    this.panel.drawHighlight(ctx, time);
+
     // HUD
     if (this.showHelp) this._drawHelp(ctx);
     if (this.showLegend) this._drawLegend(ctx);
+    if (this.showArchive) this._drawArchive(ctx);
     if (this.showStats) this._drawStats(ctx);
   }
 
@@ -454,8 +566,13 @@ class PondApp {
       babies > 0 ? `幼龟 ${babies}` : null,
       this.eggs.length > 0 ? `蛋 ${this.eggs.length}` : null,
     ].filter(Boolean).join('  ');
+    // 时段显示（昼夜开启时）
+    const dn = CONFIG.daynight?.enabled ? `  |  ${this.daynight.phase.icon} ${this.daynight.phase.label}${this.daynight.speed > 1 ? ` ×${this.daynight.speed}` : ''}` : '';
+    // 天气 + 生命档案计数（阶段 5-⑤⑥）
+    const wx = CONFIG.weather?.enabled ? `  |  ${this.weather.summary}` : '';
+    const arch = this.archive.count() > 0 ? `  |  📖 ${this.archive.count()}` : '';
     ctx.fillText(
-      `FPS ${this._curFps.toFixed(0)}  |  鱼 ${this.fishes.length}  龟 ${this.turtles.length}  食物 ${this.food.aliveCount}${extra ? '  |  ' + extra : ''}${this.paused ? '  |  ⏸ 已暂停' : ''}`,
+      `FPS ${this._curFps.toFixed(0)}  |  鱼 ${this.fishes.length}  龟 ${this.turtles.length}  食物 ${this.food.aliveCount}${extra ? '  |  ' + extra : ''}${dn}${wx}${arch}${this.paused ? '  |  ⏸ 已暂停' : ''}`,
       12, this.world.h - 12
     );
     ctx.restore();
@@ -465,8 +582,10 @@ class PondApp {
     const lines = [
       '🐢 乌龟水塘',
       '',
-      '左键点击  →  投喂饲料',
+      '左键点鱼/龟 → 查看信息卡（可改名）',
+      '左键点空白  →  投喂饲料',
       '移动鼠标  →  鱼群避让 / 乌龟好奇',
+      'Esc       →  关闭信息卡',
       '右键 / H  →  显示/隐藏帮助',
       '空格      →  暂停 / 继续',
       'F         →  全屏',
@@ -474,8 +593,12 @@ class PondApp {
       'T         →  增加乌龟',
       'L         →  物种列表',
       'P         →  显示/隐藏植物',
+      'N         →  时间快进 ×25（看昼夜）',
+      'W         →  切换天气（晴/雨/雨后）',
+      'O         →  生命档案（逝者纪念册）',
       '',
-      '🌿 鱼吃饱会繁殖鱼苗，龟上岸会产蛋孵化',
+      '🌿 鱼吃饱繁殖鱼苗，龟上岸产蛋孵化',
+      '📖 逝者留下遗骸（螺蛳清理），记入生命档案',
     ];
     this._panel(ctx, lines, 16, 16);
   }
@@ -498,6 +621,33 @@ class PondApp {
     }
     if (this.turtles.length === 0) lines.push('  （暂无乌龟）');
     this._panel(ctx, lines, 16, this.world.h - 40 - lines.length * 21, '#a8d8f0');
+  }
+
+  /** 生命档案面板（阶段 5-⑥） */
+  _drawArchive(ctx) {
+    const entries = this.archive.list();
+    const lines = [`📖 生命档案（共 ${entries.length} 位）`, ''];
+    if (entries.length === 0) {
+      lines.push('（还没有居民离世，水塘一片祥和）');
+    } else {
+      const shown = entries.slice(0, 10);
+      for (const e of shown) {
+        const cause = CAUSE_LABELS[e.cause] ?? e.cause;
+        const kind = KIND_LABELS[e.kind] ?? e.kind;
+        lines.push(`· ${e.name}  ${e.species}·${kind} 第${e.gen}代  ${cause}  享年 ${this._fmtAge(e.age)}`);
+      }
+      if (entries.length > shown.length) lines.push(`… 其余 ${entries.length - shown.length} 条见 pond.archive()`);
+    }
+    lines.push('');
+    lines.push('O 键关闭');
+    this._panel(ctx, lines, Math.max(16, this.world.w - 470), 16, '#e8c8a8');
+  }
+
+  /** 秒数 → 可读时长 */
+  _fmtAge(s) {
+    if (s < 60) return `${Math.round(s)}秒`;
+    if (s < 3600) return `${Math.floor(s / 60)}分${Math.round(s % 60)}秒`;
+    return `${(s / 3600).toFixed(1)}小时`;
   }
 
   /** 通用面板绘制 */
@@ -533,6 +683,12 @@ class PondApp {
 window.addEventListener('DOMContentLoaded', () => {
   window.pondApp = new PondApp();
 
+  // URL 参数 ?t=0.85 → 直接跳到指定时刻（调试/分享用，0=黎明 0.3=白天 0.56=黄昏 0.85=夜晚）
+  const tParam = parseFloat(new URLSearchParams(location.search).get('t'));
+  if (!Number.isNaN(tParam) && window.pondApp.daynight) {
+    window.pondApp.daynight.setDayT(Math.min(1, Math.max(0, tParam)));
+  }
+
   // 控制台 API（也供将来 Lively 扩展调用）
   window.pond = {
     app: () => window.pondApp,
@@ -563,10 +719,35 @@ window.addEventListener('DOMContentLoaded', () => {
       eggs: window.pondApp.eggs.length,
       caps: { fish: CONFIG.growth.fishCap, turtle: CONFIG.growth.turtleCap },
     }),
+    /** 昼夜时间：pond.time() → 当前时段/光强；pond.setTime(0.65) 跳到夜晚 */
+    time: () => ({
+      dayT: +window.pondApp.daynight.dayT.toFixed(3),
+      phase: window.pondApp.daynight.phase.label,
+      icon: window.pondApp.daynight.phase.icon,
+      light: +window.pondApp.daynight.light.toFixed(2),
+      speed: window.pondApp.daynight.speed,
+    }),
+    setTime: (t) => window.pondApp.daynight.setDayT(t),
     /** 重建种群：pond.setPopulation({fish:{koi:5}, turtle:{redear:2}}) */
     setPopulation: (p) => window.pondApp.setPopulation(p),
     /** 投喂：pond.feed(x, y) */
     feed: (x, y) => window.pondApp.food.feed(x, y),
+    /** 天气：pond.weather() / pond.setWeather('rain') */
+    weather: () => ({
+      state: window.pondApp.weather.state,
+      summary: window.pondApp.weather.summary,
+      drops: window.pondApp.weather.drops.length,
+    }),
+    setWeather: (s) => window.pondApp.weather.set(s),
+    /** 生命档案：pond.archive() / pond.archiveDetail('墨墨') / pond.archiveStats() */
+    archive: () => window.pondApp.archive.list(),
+    archiveDetail: (name) => window.pondApp.archive.detail(name),
+    archiveStats: () => window.pondApp.archive.stats(),
+    /** 分解者与遗骸：pond.scavengers() → { snails, shrimps, remains } */
+    scavengers: () => ({
+      ...window.pondApp.scavengers.population(),
+      remains: window.pondApp.remains.length,
+    }),
     pause: () => { window.pondApp.paused = true; },
     play: () => { window.pondApp.paused = false; },
   };
@@ -613,6 +794,16 @@ window.livelyPropertyListener = function (name, val) {
       break;
     case 'showPlants':
       app.plantsEnabled = !!val;
+      break;
+    case 'daynightEnabled':
+      CONFIG.daynight.enabled = !!val;
+      break;
+    case 'dayLength':
+      if (CONFIG.daynight) CONFIG.daynight.dayLength = val;
+      if (app.daynight) app.daynight.dayLength = val;
+      break;
+    case 'weatherEnabled':
+      CONFIG.weather.enabled = !!val;
       break;
   }
 };

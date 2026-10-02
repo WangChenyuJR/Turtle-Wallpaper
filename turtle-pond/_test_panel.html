@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>阶段5-⑥ 生物信息面板 测试</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto; z-index: 999;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { TURTLE_SPECIES, FISH_SPECIES } from './src/species.js';
+    import { TURTLE_RESEARCH, FISH_RESEARCH } from './src/data/species-research.js';
+
+    setTimeout(async () => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+      // 轮询等待异步条件成立（最多 ms 毫秒）
+      const until = (fn, ms = 3000) => new Promise((res) => {
+        const t0 = performance.now();
+        const iv = setInterval(() => {
+          if (fn() || performance.now() - t0 > ms) { clearInterval(iv); res(); }
+        }, 50);
+      });
+
+      try {
+        localStorage.removeItem('pond.names');
+        localStorage.removeItem('pond.uidSeq');
+        const app = window.pondApp;
+        ok(!!app, '场景已初始化');
+        ok(!!app.panel, '信息面板已挂载');
+        const panel = app.panel;
+
+        // ── 1. 必选 6 龟种已注册 ───────────────────────
+        const need = ['yellowthroat', 'helmetedSideNeck', 'caramelSlider', 'goldLineReeves', 'redbellySideNeck', 'terrapin'];
+        for (const id of need) ok(!!TURTLE_SPECIES[id], `龟种已注册: ${id}`);
+        log.push(`   龟种总数: ${Object.keys(TURTLE_SPECIES).length}（预期 13）`);
+        ok(Object.keys(TURTLE_SPECIES).length === 13, '龟种总数 = 13');
+        ok(!!TURTLE_RESEARCH.yellowthroat?.info, '黄喉图鉴数据就位');
+
+        // ── 2. 默认种群含黄喉 ──────────────────────────
+        const yt = app.turtles.find((t) => t.species.id === 'yellowthroat');
+        ok(!!yt, '默认种群含 1 只黄喉拟水龟');
+
+        // ── 3. 命中检测 ────────────────────────────────
+        const t0 = app.turtles[0];
+        t0.x = 600; t0.y = 600;
+        const hit = panel.hitTest(600, 600);
+        ok(hit === t0, 'hitTest 点中龟');
+        ok(panel.hitTest(5, 5) === null || panel.hitTest(5, 5) !== t0, '远处不误命中');
+
+        // ── 4. 打开面板 + uid 分配 ─────────────────────
+        const consumed = panel.handleCanvasClick(600, 600);
+        ok(consumed === true, '点中生物 → handleCanvasClick 返回 true（不投喂）');
+        ok(panel.selected === t0, '面板选中该龟');
+        ok(panel.el.classList.contains('cp-open'), '面板 DOM 已打开');
+        ok(!!t0._uid && t0._uid > 0, `uid 已分配（uid=${t0._uid}）`);
+        ok(parseInt(localStorage.getItem('pond.uidSeq'), 10) >= t0._uid, 'uidSeq 已持久化');
+
+        // ── 5. 名字默认值 + 编辑 + 持久化 ──────────────
+        ok(panel.nameInput.value === t0.species.label, `名字默认=品种名（${panel.nameInput.value}）`);
+        panel.nameInput.value = '大乌龟';
+        panel.nameInput.dispatchEvent(new Event('change'));
+        const stored = JSON.parse(localStorage.getItem('pond.names') || '{}');
+        ok(stored[t0._uid] === '大乌龟', '改名已写入 localStorage');
+
+        // 关闭再打开，名字应保留
+        panel.close();
+        ok(!panel.el.classList.contains('cp-open'), 'close() 后面板关闭');
+        panel.select(t0);
+        ok(panel.nameInput.value === '大乌龟', '重开面板名字保留');
+
+        // ── 6. 资料与状态渲染（用黄喉实例：有完整图鉴数据）──
+        const ytPanel = yt ?? app.turtles.find((t) => t.species.id === 'yellowthroat');
+        panel.select(ytPanel);
+        const infoHtml = panel.el.querySelector('.cp-info').innerHTML;
+        ok(infoHtml.includes('Mauremys mutica'), '图鉴资料含学名');
+        ok(infoHtml.includes('栖息类型'), '图鉴资料含栖息类型');
+        const statusHtml = panel.el.querySelector('.cp-status').innerHTML;
+        ok(statusHtml.includes('当前状态'), '状态栏已渲染: ' + statusHtml.replace(/<[^>]+>/g, '').slice(0, 40));
+
+        // ── 7. 图片元素（黄喉有水彩图）────────────────
+        const imgTop = panel.el.querySelector('.cp-img-top');
+        const imgSide = panel.el.querySelector('.cp-img-side');
+        // 图片为首次请求，src 由 onload 异步赋值 → 轮询等待加载完成
+        await until(() =>
+          imgTop.getAttribute('src')?.includes('yellowthroat_top.png') &&
+          imgSide.getAttribute('src')?.includes('yellowthroat_side.png')
+        );
+        log.push(`   imgTop.src=${imgTop.getAttribute('src') || '(空)'}`);
+        ok(imgTop.getAttribute('src')?.includes('yellowthroat_top.png'), '俯视图 src 指向水彩图');
+        ok(imgSide.getAttribute('src')?.includes('yellowthroat_side.png'), '侧视图 src 指向水彩图');
+
+        // ── 8. 无图品种 fallback（鱼类）────────────────
+        const f0 = app.fishes[0];
+        panel.select(f0);
+        ok(panel.selected === f0, '切换选中鱼');
+        ok(panel.nameInput.value === f0.species.label, '鱼的名字默认=品种名');
+        const cvSide = panel.el.querySelector('.cp-cv-side');
+        ok(cvSide.style.display !== 'none' || imgSide.getAttribute('src')?.includes(f0.species.id), '无图品种走矢量帧或正确图');
+        panel.nameInput.value = '小金';
+        panel.nameInput.dispatchEvent(new Event('change'));
+        ok(JSON.parse(localStorage.getItem('pond.names'))[f0._uid] === '小金', '鱼也能改名');
+
+        // ── 9. 点空白 → 关闭面板 + 返回 false（投喂）──
+        const before = panel.selected;
+        const consumed2 = panel.handleCanvasClick(30, 30);
+        ok(consumed2 === false, '点空白返回 false（继续投喂）');
+        ok(panel.selected === null && before !== null, '点空白后面板关闭');
+
+        // ── 10. 选中个体被移除 → 面板自动关闭 ──────────
+        panel.select(t0);
+        ok(panel.selected === t0, '重新选中龟');
+        // 精确移除 t0 本体（不按品种，避免误删同类）
+        const idx0 = app.turtles.indexOf(t0);
+        app.turtles.splice(idx0, 1);
+        panel.drawHighlight(app.ctx, 1.0);   // 触发清理检查
+        ok(panel.selected === null, '个体被移除后面板自动关闭');
+
+        // ── 11. 长跑稳定性（面板开着跑 400 步）────────
+        panel.select(app.turtles[0]);
+        let nan = false;
+        for (let i = 0; i < 400; i++) {
+          app.panel.tick(0.016);
+          app._update(0.016, i * 0.016);
+          const all = [...app.turtles, ...app.fishes];
+          if (all.some((c) => Number.isNaN(c.x) || Number.isNaN(c.y))) { nan = true; break; }
+        }
+        ok(!nan, '面板开启 400 步长跑无 NaN');
+        ok(true, '长跑无异常');
+
+        // 恢复名字存储（测试清洁）
+        localStorage.removeItem('pond.names');
+
+        log.push('');
+        log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+      }
+      document.getElementById('report').textContent = log.join('\n');
+    }, 900);
+  </script>
+</body>
+</html>
