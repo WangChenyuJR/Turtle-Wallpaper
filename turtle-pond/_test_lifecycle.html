@@ -48,11 +48,15 @@
         for (let i = 0; i < 10; i++) app._update(0.05, i * 0.05);
         ok(w.state === 'rain' && w.drops.length > 0, `切雨后雨滴生成（${w.drops.length} 滴）`);
 
-        // 雨天天然投喂回调已接通
+        // 雨天天然投喂回调已接通（计数回调触发，避免被鱼吃掉干扰断言）
         CONFIG.weather.rainFoodDropInterval = 0.05;
-        const beforeFood = app.food.aliveCount;
+        app.weather._foodTimer = 0;   // 清零：默认间隔 4s，不清零 3s 内不会触发
+        const origDrop = app.weather.onRainFoodDrop;
+        let dropCount = 0;
+        app.weather.onRainFoodDrop = (x) => { dropCount++; origDrop(x); };
         for (let i = 0; i < 60; i++) app._update(0.05, 1 + i * 0.05);
-        ok(app.food.aliveCount > beforeFood, '雨天"雨水冲落"天然食物已进池塘');
+        app.weather.onRainFoodDrop = origDrop;
+        ok(dropCount > 0, `雨天"雨水冲落"回调触发 ${dropCount} 次`);
         CONFIG.weather.rainFoodDropInterval = saved.rainFoodDropInterval;
         w.set('sunny');
 
@@ -120,11 +124,10 @@
         r2.nibble(0.5);
         ok(Math.abs(r2.decay - 0.5) < 0.01 && r2.eatenBits === 1, 'nibble() 计数与衰减正确');
 
-        // 虾吃沉底食物
+        // 虾吃沉底食物（食物直接放嘴边，避免出生点距离干扰）
         const sh = new Shrimp(W);
-        const bottom = W.marshLineAt(sh.x) - 8;
-        const fd = new Food(sh.x, bottom);
-        fd.x = sh.x; fd.y = bottom; fd.eaten = false;
+        const fd = new Food(sh.x, sh.y);
+        fd.x = sh.x; fd.y = sh.y; fd.eaten = false;
         for (let i = 0; i < 20 && !fd.eaten; i++) sh.update(0.05, [fd]);
         ok(fd.eaten, '虾捡食沉底食物');
 

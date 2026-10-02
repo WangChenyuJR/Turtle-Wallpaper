@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>黄喉拟水龟 · 矢量风格测试</title>
+<style>
+  body { margin: 0; padding: 18px; background: #f5f1e6; color: #3a3428;
+         font-family: "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { font-size: 13px; color: #7a7260; margin-bottom: 16px; }
+  .row { display: flex; align-items: center; gap: 18px; background: #fffdf6;
+         border: 1px solid #e2d9c2; border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .row .num { width: 34px; height: 34px; border-radius: 50%; background: #7a6a3a; color: #fff;
+              display: flex; align-items: center; justify-content: center; font-size: 17px; flex: none; }
+  .big  canvas { width: 240px; height: 240px; display: block; }
+  .anim canvas { width: 230px; height: 140px; display: block; border-radius: 8px; }
+  .desc { flex: 1; font-size: 13px; line-height: 1.65; }
+  .desc h3 { margin: 0 0 6px; font-size: 15px; }
+  .desc p { margin: 0; color: #5c5544; }
+  .foot { font-size: 12px; color: #8a8270; margin-top: 10px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<script>
+  window.onerror = (m, s, l, c, e) => {
+    const d = document.createElement('div');
+    d.id = 'jserr';
+    d.textContent = 'JSERR: ' + m + ' @line ' + l + ':' + c + (e && e.stack ? ' | ' + e.stack.split('\n')[1] : '');
+    document.body.appendChild(d);
+  };
+</script>
+<h1>黄喉拟水龟 · 矢量绘制风格测试（俯视）</h1>
+<div class="sub">目标：介于现有简洁线段（0）与水彩立绘之间的中间档。每行 = 静态大图 + 游动动画。</div>
+<div id="rows"></div>
+<div class="foot">
+  注：动画以四肢划水相位驱动，无头环境亦可见摆动姿态。选定编号后正式接入 turtle.js 时，
+  壳/头等静态部件将按品种离屏缓存（每品种仅渲染一次），四肢与尾每帧动态绘制，预计整体帧成本与现状相当。
+</div>
+
+<script>
+'use strict';
+// ── 黄喉拟水龟色板（与 species.js 一致）─────────────────
+const YT = {
+  shell: '#7a6a3a',   // 背甲橄榄棕
+  band:  '#a89254',   // 缘盾黄褐环带
+  scute: '#85754a',   // 椎盾微亮
+  limb:  '#5f5230',   // 四肢灰褐
+  head:  '#8a8040',   // 头
+  yellow:'#e8d24e',   // 头侧淡黄纵纹
+  yellow2:'#f2e27a',  // 黄纹内芯
+  line:  '#3a3122',   // 描边深褐
+  ridge: '#5d5030',   // 脊棱暗线
+  ridgeHi:'#a08e58',  // 脊棱受光
+};
+const INK = { // D 墨线淡彩：整体降饱和
+  shell: '#7d7154', band: '#a99b6e', scute: '#6f6448', limb: '#5e5544',
+  head:  '#7f7858', yellow: '#d9c980', yellow2: '#e6d998',
+  line:  '#2c281e', ridge: '#4a4335', ridgeHi: '#d8cfae',
+};
+
+// 固定种子伪随机（保证每帧绘制结果一致，不闪烁）
+function sRand(seed) {
+  return () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+}
+
+// ── 通用部件 ──────────────────────────────────────────────
+function drawLegs(ctx, s, ph, C, o) {
+  const swing = Math.sin(ph) * (o.paddle ? 0.5 : 0.22);
+  const pos = [[s*0.32,-s*0.42],[s*0.32,s*0.42],[-s*0.3,-s*0.42],[-s*0.3,s*0.42]];
+  pos.forEach(([lx,ly], i) => {
+    const sw = i % 2 === 0 ? swing : -swing;
+    ctx.save();
+    ctx.translate(lx + sw*s*0.28, ly);
+    ctx.rotate(sw*0.4);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s*0.16, s*0.11, 0, 0, Math.PI*2);
+    ctx.fillStyle = C.limb; ctx.fill();
+    if (o.outline) { ctx.strokeStyle = C.line; ctx.lineWidth = Math.max(1, s*0.018); ctx.stroke(); }
+    if (o.joint) { // 关节褶线
+      ctx.beginPath(); ctx.moveTo(-s*0.05, -s*0.09); ctx.quadraticCurveTo(-s*0.10, 0, -s*0.05, s*0.09);
+      ctx.strokeStyle = 'rgba(0,0,0,0.30)'; ctx.lineWidth = Math.max(0.8, s*0.012); ctx.stroke();
+    }
+    if (o.toes) { // 趾蹼分开：3 条短线
+      ctx.strokeStyle = o.inkToes ? C.line : 'rgba(0,0,0,0.42)';
+      ctx.lineWidth = Math.max(0.9, s*0.014); ctx.lineCap = 'round';
+      [-0.5, 0, 0.5].forEach((a) => {
+        ctx.beginPath(); ctx.moveTo(s*0.10, a*s*0.045);
+        ctx.lineTo(s*0.165, a*s*0.085); ctx.stroke();
+      });
+    }
+    ctx.restore();
+  });
+}
+
+function drawHead(ctx, s, ph, C, o) {
+  const ext = 0.42;
+  const bob = Math.sin(ph*0.66) * s * 0.03;
+  const hx = s*(0.45+ext), hy = bob;
+  ctx.save();
+  // 头本体
+  ctx.beginPath(); ctx.ellipse(hx, hy, s*0.20, s*0.16, 0, 0, Math.PI*2);
+  ctx.fillStyle = C.head; ctx.fill();
+  if (o.outline) { ctx.strokeStyle = C.line; ctx.lineWidth = Math.max(1, s*0.02); ctx.stroke(); }
+  // 头侧黄色纵纹（眼后 → 颈，黄喉标志）
+  if (o.mark) { // 现状基线的简单黄斑
+    ctx.fillStyle = C.yellow;
+    ctx.beginPath(); ctx.ellipse(hx - s*0.02, hy - s*0.09, s*0.07, s*0.035, -0.3, 0, Math.PI*2); ctx.fill();
+  }
+  if (o.stripes) {
+    [-1, 1].forEach((sd) => {
+      ctx.beginPath();
+      ctx.moveTo(hx - s*0.06, hy + sd*s*0.075);
+      ctx.quadraticCurveTo(hx + s*0.05, hy + sd*s*0.105, hx + s*0.17, hy + sd*s*0.065);
+      ctx.strokeStyle = C.yellow; ctx.lineWidth = s*0.05; ctx.lineCap = 'round'; ctx.stroke();
+      if (o.stripeCore) { // 内芯更亮（水彩叠色感）
+        ctx.beginPath();
+        ctx.moveTo(hx - s*0.02, hy + sd*s*0.078);
+        ctx.quadraticCurveTo(hx + s*0.06, hy + sd*s*0.098, hx + s*0.15, hy + sd*s*0.066);
+        ctx.strokeStyle = C.yellow2; ctx.lineWidth = s*0.02; ctx.stroke();
+      }
+      if (o.inkMark) { // 墨线勾边
+        ctx.beginPath();
+        ctx.moveTo(hx - s*0.06, hy + sd*s*0.075);
+        ctx.quadraticCurveTo(hx + s*0.05, hy + sd*s*0.105, hx + s*0.17, hy + sd*s*0.065);
+        ctx.strokeStyle = 'rgba(44,40,30,0.55)'; ctx.lineWidth = Math.max(0.7, s*0.008); ctx.stroke();
+      }
+    });
+  }
+  // 颈褶
+  if (o.neck) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = Math.max(0.8, s*0.011);
+    [-1, 1].forEach((sd) => {
+      ctx.beginPath();
+      ctx.moveTo(hx - s*0.10, hy + sd*s*0.05);
+      ctx.quadraticCurveTo(hx - s*0.14, hy + sd*s*0.09, hx - s*0.09, hy + sd*s*0.13);
+      ctx.stroke();
+    });
+  }
+  // 头顶碎斑
+  if (o.spots) {
+    const r = sRand(23);
+    ctx.fillStyle = 'rgba(0,0,0,0.20)';
+    for (let i = 0; i < 5; i++) {
+      ctx.beginPath();
+      ctx.ellipse(hx - s*0.02 + r()*s*0.14, hy - s*0.06 + r()*s*0.12,
+                  s*0.014 + r()*s*0.012, s*0.010 + r()*s*0.008, r()*3, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+  // 双眼（俯视对称）+ 留白高光
+  if (o.eyes) {
+    [-1, 1].forEach((sd) => {
+      ctx.beginPath(); ctx.arc(hx + s*0.095, hy + sd*s*0.088, Math.max(1.4, s*0.036), 0, Math.PI*2);
+      ctx.fillStyle = '#141210'; ctx.fill();
+      ctx.beginPath(); ctx.arc(hx + s*0.105, hy + sd*s*(0.088 - 0.012*sd) - s*0.012,
+                               Math.max(0.5, s*0.011), 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+    });
+  }
+  // 嘴缝
+  if (o.mouth) {
+    ctx.beginPath(); ctx.moveTo(hx + s*0.185, hy);
+    ctx.quadraticCurveTo(hx + s*0.14, hy + s*0.035, hx + s*0.09, hy + s*0.03);
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = Math.max(0.8, s*0.012);
+    ctx.lineCap = 'round'; ctx.stroke();
+  }
+  ctx.restore();
+  return { hx, hy };
+}
+
+function drawTail(ctx, s, ph, C, o) {
+  const wag = Math.sin(ph*0.8) * 0.08;
+  ctx.save();
+  ctx.rotate(wag);
+  ctx.beginPath();
+  ctx.moveTo(-s*0.53, 0);
+  ctx.quadraticCurveTo(-s*0.66, -s*0.10, -s*0.72, -s*0.03);
+  ctx.quadraticCurveTo(-s*0.66, s*0.09, -s*0.53, s*0.06);
+  ctx.closePath();
+  ctx.fillStyle = C.limb; ctx.fill();
+  if (o.outline) { ctx.strokeStyle = C.line; ctx.lineWidth = Math.max(1, s*0.016); ctx.stroke(); }
+  ctx.restore();
+}
+
+// ── 风格 0：现状基线（渐变壳 + 简单纵纹）──────────────
+function drawBase(ctx, s, ph) {
+  const C = YT;
+  drawLegs(ctx, s, ph, C, {});
+  drawHead(ctx, s, ph, C, { mark: true, eyes: false });
+  // 单眼（现状只画一只）
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(s*1.32, Math.sin(ph*0.66)*s*0.03 - s*0.06, Math.max(1.2, s*0.035), 0, Math.PI*2); ctx.fill();
+  const ry = s*0.46;
+  const g = ctx.createRadialGradient(-s*0.08, -s*0.08, s*0.1, 0, 0, s*0.62);
+  g.addColorStop(0, '#9b8a52'); g.addColorStop(1, C.shell);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.ellipse(0, 0, s*0.56, ry, 0, 0, Math.PI*2); ctx.fill();
+  // lines 纹（近似现状：3 条细长椭圆）
+  ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = Math.max(1, s*0.024);
+  [-1, 0, 1].forEach((i) => {
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s*0.16, ry*(0.9 - Math.abs(i)*0.18), i*0.5, 0, Math.PI*2);
+    ctx.stroke();
+  });
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath(); ctx.ellipse(-s*0.14, -s*0.14, s*0.18, s*0.11, -0.4, 0, Math.PI*2); ctx.fill();
+  drawTail(ctx, s, ph, C, {});
+}
+
+// ── 壳：描边分层（A 的核心）───────────────────────────
+function shellOutline(ctx, s, C, o) {
+  const rx = s*0.56, ry = s*0.46;
+  const lw = Math.max(1, s*0.02);
+  // 缘盾环带
+  ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI*2);
+  ctx.fillStyle = C.band; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = lw; ctx.stroke();
+  // 中央甲
+  ctx.beginPath(); ctx.ellipse(0, 0, rx*0.80, ry*0.76, 0, 0, Math.PI*2);
+  ctx.fillStyle = C.shell; ctx.fill();
+  if (o.ink) { ctx.strokeStyle = 'rgba(44,40,30,0.5)'; ctx.lineWidth = lw*0.6; ctx.stroke(); }
+  // 椎盾纵条
+  if (!o.ink) {
+    ctx.beginPath(); ctx.ellipse(0, 0, s*0.13, ry*0.62, 0, 0, Math.PI*2);
+    ctx.fillStyle = C.scute; ctx.fill();
+  }
+  // 盾片缝：竖 2 + 横 3
+  ctx.strokeStyle = o.ink ? 'rgba(44,40,30,0.38)' : 'rgba(0,0,0,0.22)';
+  ctx.lineWidth = Math.max(0.8, s*0.011);
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath(); ctx.moveTo(sd*s*0.17, -ry*0.62);
+    ctx.quadraticCurveTo(sd*s*0.22, 0, sd*s*0.17, ry*0.62); ctx.stroke();
+  });
+  [-0.62, 0, 0.62].forEach((f) => {
+    ctx.beginPath(); ctx.moveTo(-rx*0.72, ry*f*0.76);
+    ctx.quadraticCurveTo(0, ry*(f*0.76 + 0.08), rx*0.72, ry*f*0.76); ctx.stroke();
+  });
+}
+
+// ── 风格 A：硬朗描边（扁平图标感）────────────────────
+function drawA(ctx, s, ph) {
+  const C = YT, o = { outline: true, toes: true, stripes: true, eyes: true, mouth: true };
+  drawLegs(ctx, s, ph, C, o);
+  drawHead(ctx, s, ph, C, o);
+  shellOutline(ctx, s, C, {});
+  drawTail(ctx, s, ph, C, o);
+}
+
+// ── 风格 B：自然图鉴（A + 生长纹/脊棱/缘盾辐射/颈褶）──
+function shellNatural(ctx, s, C, o) {
+  shellOutline(ctx, s, C, o);
+  const rx = s*0.56, ry = s*0.46;
+  // 三条脊棱：中央暗线+受光线，两侧弱线
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(80,68,38,0.65)'; ctx.lineWidth = Math.max(1.2, s*0.028);
+  ctx.beginPath(); ctx.moveTo(0, -ry*0.66); ctx.quadraticCurveTo(0, 0, 0, ry*0.66); ctx.stroke();
+  ctx.strokeStyle = 'rgba(175,156,98,0.7)'; ctx.lineWidth = Math.max(0.9, s*0.013);
+  ctx.beginPath(); ctx.moveTo(s*0.014, -ry*0.66); ctx.quadraticCurveTo(s*0.014, 0, s*0.014, ry*0.66); ctx.stroke();
+  ctx.strokeStyle = 'rgba(80,68,38,0.32)';
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath(); ctx.moveTo(sd*s*0.15, -ry*0.56);
+    ctx.quadraticCurveTo(sd*s*0.17, 0, sd*s*0.15, ry*0.56); ctx.stroke();
+  });
+  // 生长纹 2 圈（虚线弧）
+  ctx.strokeStyle = 'rgba(0,0,0,0.30)'; ctx.lineWidth = Math.max(1, s*0.013);
+  ctx.setLineDash([s*0.045, s*0.04]);
+  [0.55, 0.68].forEach((f) => {
+    ctx.beginPath(); ctx.ellipse(0, 0, rx*0.8*f/0.8, ry*0.76*f/0.8, 0, -0.4, Math.PI+0.4); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  // 缘盾辐射分隔线
+  ctx.strokeStyle = 'rgba(0,0,0,0.26)'; ctx.lineWidth = Math.max(0.8, s*0.010);
+  for (let i = 0; i < 14; i++) {
+    const a = (i/14)*Math.PI*2 + 0.12;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a)*rx*0.80, Math.sin(a)*ry*0.76);
+    ctx.lineTo(Math.cos(a)*rx*0.97, Math.sin(a)*ry*0.965);
+    ctx.stroke();
+  }
+}
+
+function drawB(ctx, s, ph) {
+  const C = YT, o = { outline: true, toes: true, joint: true, stripes: true,
+                      eyes: true, mouth: true, neck: true, spots: true };
+  drawLegs(ctx, s, ph, C, o);
+  drawHead(ctx, s, ph, C, o);
+  shellNatural(ctx, s, C, {});
+  drawTail(ctx, s, ph, C, o);
+}
+
+// ── 风格 C：轻水彩（B + 晕染斑/洇纸边/高光弧带）───────
+function washPath(ctx, s, seed) { // 轮廓微扰（手绘边，首尾闭合）
+  const rx = s*0.56, ry = s*0.46, r = sRand(seed);
+  const j = [];
+  for (let i = 0; i < 16; i++) j.push(1 + (r()-0.5)*0.035);
+  ctx.beginPath();
+  const N = 16;
+  for (let i = 0; i <= N; i++) {
+    const a = (i/N)*Math.PI*2;
+    const k = i % N;
+    const x = Math.cos(a)*rx*j[k], y = Math.sin(a)*ry*j[k];
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function shellWash(ctx, s) {
+  const C = YT, rx = s*0.56, ry = s*0.46;
+  // 洇纸外晕 2 层
+  [ {w: s*0.10, a: 0.10}, {w: s*0.045, a: 0.16} ].forEach(({w, a}) => {
+    washPath(ctx, s, 11);
+    ctx.strokeStyle = C.band; ctx.globalAlpha = a; ctx.lineWidth = w; ctx.stroke();
+    ctx.globalAlpha = 1;
+  });
+  // 壳体（渐变 + 扰动轮廓）
+  const g = ctx.createRadialGradient(-s*0.12, -s*0.12, s*0.08, 0, 0, rx*1.05);
+  g.addColorStop(0, '#94834f'); g.addColorStop(1, '#6e6038');
+  washPath(ctx, s, 11); ctx.fillStyle = g; ctx.fill();
+  // 环带
+  washPath(ctx, s, 11); ctx.strokeStyle = 'rgba(168,146,84,0.55)';
+  ctx.lineWidth = s*0.055; ctx.stroke();
+  // 椎盾 + 盾缝（淡）
+  ctx.beginPath(); ctx.ellipse(0, 0, s*0.13, ry*0.62, 0, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(133,117,74,0.6)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = Math.max(0.8, s*0.010);
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath(); ctx.moveTo(sd*s*0.17, -ry*0.62);
+    ctx.quadraticCurveTo(sd*s*0.22, 0, sd*s*0.17, ry*0.62); ctx.stroke();
+  });
+  [-0.62, 0, 0.62].forEach((f) => {
+    ctx.beginPath(); ctx.moveTo(-rx*0.72, ry*f*0.76);
+    ctx.quadraticCurveTo(0, ry*(f*0.76 + 0.08), rx*0.72, ry*f*0.76); ctx.stroke();
+  });
+  // 脊棱
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(93,80,48,0.45)'; ctx.lineWidth = Math.max(1, s*0.02);
+  ctx.beginPath(); ctx.moveTo(0, -ry*0.64); ctx.quadraticCurveTo(0, 0, 0, ry*0.64); ctx.stroke();
+  ctx.strokeStyle = 'rgba(200,180,120,0.5)'; ctx.lineWidth = Math.max(0.8, s*0.010);
+  ctx.beginPath(); ctx.moveTo(s*0.013, -ry*0.64); ctx.quadraticCurveTo(s*0.013, 0, s*0.013, ry*0.64); ctx.stroke();
+  // 生长纹
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.setLineDash([s*0.045, s*0.04]);
+  [0.55, 0.68].forEach((f) => {
+    ctx.beginPath(); ctx.ellipse(0, 0, rx*f, ry*0.95*f, 0, -0.4, Math.PI+0.4); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  // 缘盾辐射
+  ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+  for (let i = 0; i < 14; i++) {
+    const a = (i/14)*Math.PI*2 + 0.12;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a)*rx*0.80, Math.sin(a)*ry*0.76);
+    ctx.lineTo(Math.cos(a)*rx*0.97, Math.sin(a)*ry*0.965);
+    ctx.stroke();
+  }
+  // 水彩晕染斑（固定 seed，3 亮 3 暗）
+  const r = sRand(37);
+  for (let i = 0; i < 6; i++) {
+    const dark = i >= 3;
+    ctx.beginPath();
+    ctx.ellipse((r()-0.5)*rx*0.9, (r()-0.5)*ry*0.9,
+                s*(0.07 + r()*0.09), s*(0.05 + r()*0.07), r()*Math.PI, 0, Math.PI*2);
+    ctx.fillStyle = dark ? 'rgba(87,73,42,0.12)' : 'rgba(203,189,130,0.13)';
+    ctx.fill();
+  }
+  // 高光弧带（左上）+ 下缘内阴影
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.ellipse(0, 0, rx*0.86, ry*0.84, 0, -2.6, -1.0);
+  ctx.strokeStyle = 'rgba(255,255,255,0.20)'; ctx.lineWidth = s*0.05; ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(0, 0, rx*0.86, ry*0.84, 0, 0.6, 2.4);
+  ctx.strokeStyle = 'rgba(0,0,0,0.10)'; ctx.lineWidth = s*0.055; ctx.stroke();
+}
+
+function drawC(ctx, s, ph) {
+  const C = YT, o = { outline: false, toes: true, joint: true, stripes: true, stripeCore: true,
+                      eyes: true, mouth: true, neck: true, spots: true };
+  // 头部水彩外晕
+  ctx.save();
+  const bob = Math.sin(ph*0.66) * s*0.03;
+  ctx.beginPath(); ctx.ellipse(s*0.87, bob, s*0.24, s*0.20, 0, 0, Math.PI*2);
+  ctx.strokeStyle = 'rgba(138,128,64,0.20)'; ctx.lineWidth = s*0.05; ctx.stroke();
+  ctx.restore();
+  drawLegs(ctx, s, ph, C, o);
+  drawHead(ctx, s, ph, C, o);
+  shellWash(ctx, s);
+  drawTail(ctx, s, ph, C, o);
+}
+
+// ── 风格 D：墨线淡彩（降饱和 + 墨线复笔 + 排线）───────
+function drawD(ctx, s, ph) {
+  const C = INK, o = { outline: true, toes: true, joint: true, stripes: true, inkMark: true,
+                       eyes: true, mouth: true, neck: true, spots: true };
+  drawLegs(ctx, s, ph, C, o);
+  drawHead(ctx, s, ph, C, o);
+  const rx = s*0.56, ry = s*0.46;
+  // 壳平涂
+  ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI*2);
+  ctx.fillStyle = C.shell; ctx.fill();
+  // 排线阴影（clip 后 45° 平行线）
+  ctx.save();
+  ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI*2); ctx.clip();
+  ctx.strokeStyle = 'rgba(0,0,0,0.10)'; ctx.lineWidth = Math.max(0.8, s*0.012);
+  for (let d = -s; d < s; d += s*0.065) {
+    ctx.beginPath(); ctx.moveTo(d, -s); ctx.lineTo(d - s*1.4, s); ctx.stroke();
+  }
+  ctx.restore();
+  // 环带（半透明叠加）
+  ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI*2);
+  ctx.strokeStyle = C.band; ctx.lineWidth = s*0.075; ctx.globalAlpha = 0.75; ctx.stroke();
+  ctx.globalAlpha = 1;
+  // 盾缝墨线
+  ctx.strokeStyle = 'rgba(44,40,30,0.38)'; ctx.lineWidth = Math.max(0.8, s*0.011);
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath(); ctx.moveTo(sd*s*0.17, -ry*0.62);
+    ctx.quadraticCurveTo(sd*s*0.22, 0, sd*s*0.17, ry*0.62); ctx.stroke();
+  });
+  // 脊棱：墨线 + 留白受光
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(74,67,53,0.7)'; ctx.lineWidth = Math.max(1, s*0.02);
+  ctx.beginPath(); ctx.moveTo(0, -ry*0.66); ctx.quadraticCurveTo(0, 0, 0, ry*0.66); ctx.stroke();
+  ctx.strokeStyle = 'rgba(216,207,174,0.55)'; ctx.lineWidth = Math.max(0.8, s*0.010);
+  ctx.beginPath(); ctx.moveTo(s*0.012, -ry*0.66); ctx.quadraticCurveTo(s*0.012, 0, s*0.012, ry*0.66); ctx.stroke();
+  // 生长纹
+  ctx.strokeStyle = 'rgba(44,40,30,0.22)'; ctx.setLineDash([s*0.045, s*0.04]);
+  [0.55, 0.68].forEach((f) => {
+    ctx.beginPath(); ctx.ellipse(0, 0, rx*f, ry*0.95*f, 0, -0.4, Math.PI+0.4); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  // 墨线复笔描边
+  ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI*2);
+  ctx.strokeStyle = C.line; ctx.lineWidth = Math.max(1.4, s*0.026); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(0, 0, rx + s*0.008, ry + s*0.008, 0, 0, Math.PI*2);
+  ctx.strokeStyle = 'rgba(44,40,30,0.35)'; ctx.lineWidth = Math.max(0.8, s*0.012); ctx.stroke();
+  drawTail(ctx, s, ph, C, o);
+}
+
+// ── 手绘有机轮廓 v2（平滑曲线：低频歪扭 + 高频手抖 + 可选趾瓣）──
+function organicPath(ctx, rx, ry, seed, o = {}) {
+  const r = sRand(seed);
+  const low = o.low ?? 0.03, high = o.high ?? 0.012;
+  // 频率必须低于采样极限（N=18 点 → <3 周期/圈），否则路径混叠自交叉、nonzero 填充抵消消失
+  const f1 = 2 + Math.floor(r() * 2);   // 2~3：形状级歪扭
+  const f2 = 3 + Math.floor(r() * 2);   // 3~4：局部鼓瘪
+  const p1 = r() * Math.PI * 2, p2 = r() * Math.PI * 2;
+  const N = 18, pts = [];
+  for (let i = 0; i < N; i++) {
+    const t = (i / N) * Math.PI * 2;
+    // 椭圆极坐标半径
+    const base = (rx * ry) / Math.hypot(ry * Math.cos(t), rx * Math.sin(t));
+    let w = 1
+      + low * Math.sin(t * f1 + p1)              // 低频：整体歪扭（不是完美椭圆）
+      + low * 0.55 * Math.sin(t * f2 + p2)       // 中频：局部鼓/瘪
+      + (r() - 0.5) * 2 * high;                  // 高频：手抖线
+    if (o.bumps) {                               // 趾瓣：高斯凸起
+      for (const [bi, ba, bs] of o.bumps) {
+        let d = t - bi;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        w += ba * Math.exp(-(d * d) / (2 * bs * bs));
+      }
+    }
+    pts.push([Math.cos(t) * base * w, Math.sin(t) * base * w]);
+  }
+  // Catmull-Rom 式平滑闭合（中点二次贝塞尔）：曲线连接，无折线感
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  ctx.beginPath();
+  const m0 = mid(pts[N - 1], pts[0]);
+  ctx.moveTo(m0[0], m0[1]);
+  for (let i = 0; i < N; i++) {
+    const p = pts[i], q = pts[(i + 1) % N], m = mid(p, q);
+    ctx.quadraticCurveTo(p[0], p[1], m[0], m[1]);
+  }
+  ctx.closePath();
+}
+
+/** 复笔描边：同一笔走两遍（宽而淡 + 窄而浓），模拟手绘笔锋的深浅 */
+function organicStroke(ctx, C, lw) {
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.strokeStyle = C.line;
+  ctx.globalAlpha = 0.30; ctx.lineWidth = lw * 1.7; ctx.stroke();
+  ctx.globalAlpha = 0.90; ctx.lineWidth = lw;       ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+// ── 风格 B′ v3：B + 全部件有机手绘轮廓 ───────────────
+// 缘盾波浪：真实龟壳外缘是一片片缘盾拼成的，轮廓带 12 处棱状微凸（手绘图最显著特征）
+const SHELL_BUMPS = (() => {
+  const r = sRand(77), arr = [];
+  for (let i = 0; i < 12; i++) {
+    arr.push([i / 12 * Math.PI * 2 + (r() - 0.5) * 0.16, 0.022 + r() * 0.013, 0.145]);
+  }
+  return arr;
+})();
+
+function shellRough(ctx, s, C) {
+  const rx = s*0.56, ry = s*0.46;
+  const lw = Math.max(1.1, s*0.022);
+  // 缘盾环带（有机外缘 + 缘盾棱波）
+  organicPath(ctx, rx, ry, 5, { low: 0.042, high: 0.011, bumps: SHELL_BUMPS });
+  ctx.fillStyle = C.band; ctx.fill();
+  organicStroke(ctx, C, lw);
+  // 中央甲（有机内缘，轻波浪）
+  organicPath(ctx, rx*0.80, ry*0.76, 9, { low: 0.034, high: 0.012,
+    bumps: SHELL_BUMPS.map(([bi, ba, bs]) => [bi, ba * 0.4, bs]) });
+  ctx.fillStyle = C.shell; ctx.fill();
+  ctx.strokeStyle = 'rgba(58,49,34,0.5)'; ctx.lineWidth = lw*0.55; ctx.stroke();
+  // 椎盾纵条
+  organicPath(ctx, s*0.13, ry*0.60, 13, { low: 0.055, high: 0.02 });
+  ctx.fillStyle = C.scute; ctx.fill();
+  // 盾片缝
+  ctx.strokeStyle = 'rgba(0,0,0,0.24)';
+  ctx.lineWidth = Math.max(0.8, s*0.011);
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath(); ctx.moveTo(sd*s*0.17, -ry*0.62);
+    ctx.quadraticCurveTo(sd*s*0.22, 0, sd*s*0.17, ry*0.62); ctx.stroke();
+  });
+  [-0.62, 0, 0.62].forEach((f) => {
+    ctx.beginPath(); ctx.moveTo(-rx*0.72, ry*f*0.76);
+    ctx.quadraticCurveTo(0, ry*(f*0.76 + 0.08), rx*0.72, ry*f*0.76); ctx.stroke();
+  });
+  // 三条脊棱
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(80,68,38,0.65)'; ctx.lineWidth = Math.max(1.2, s*0.028);
+  ctx.beginPath(); ctx.moveTo(0, -ry*0.64); ctx.quadraticCurveTo(0, 0, 0, ry*0.64); ctx.stroke();
+  ctx.strokeStyle = 'rgba(175,156,98,0.7)'; ctx.lineWidth = Math.max(0.9, s*0.013);
+  ctx.beginPath(); ctx.moveTo(s*0.014, -ry*0.64); ctx.quadraticCurveTo(s*0.014, 0, s*0.014, ry*0.64); ctx.stroke();
+  ctx.strokeStyle = 'rgba(80,68,38,0.32)';
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath(); ctx.moveTo(sd*s*0.15, -ry*0.54);
+    ctx.quadraticCurveTo(sd*s*0.17, 0, sd*s*0.15, ry*0.54); ctx.stroke();
+  });
+  // 生长纹（有机虚线弧）
+  ctx.strokeStyle = 'rgba(0,0,0,0.30)'; ctx.lineWidth = Math.max(1, s*0.013);
+  ctx.setLineDash([s*0.045, s*0.04]);
+  [0.52, 0.64].forEach((f) => {
+    organicPath(ctx, rx*0.8*f, ry*0.76*f, 9, { low: 0.05, high: 0.018 });
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  // 缘盾片片感：12 片交替明暗弧带（手绘图"一片片甲"的视觉来源）
+  const bandW = rx * 0.115;
+  for (let i = 0; i < 12; i++) {
+    const a0 = (i/12)*Math.PI*2 + 0.10, a1 = ((i+1)/12)*Math.PI*2 - 0.10;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx*0.90, ry*0.885, 0, a0, a1);
+    ctx.strokeStyle = i % 2 === 0 ? 'rgba(0,0,0,0.075)' : 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = bandW; ctx.lineCap = 'butt'; ctx.stroke();
+  }
+  // 缘盾辐射
+  ctx.strokeStyle = 'rgba(0,0,0,0.26)'; ctx.lineWidth = Math.max(0.8, s*0.010);
+  for (let i = 0; i < 14; i++) {
+    const a = (i/14)*Math.PI*2 + 0.12;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a)*rx*0.80, Math.sin(a)*ry*0.76);
+    ctx.lineTo(Math.cos(a)*rx*0.97, Math.sin(a)*ry*0.965);
+    ctx.stroke();
+  }
+}
+
+function drawBR(ctx, s, ph) {
+  const C = YT;
+  // 腿（有机轮廓 + 3 趾瓣凸起朝壳外侧，趾缝线分开）
+  const swing = Math.sin(ph) * 0.5;
+  const pos = [[s*0.32,-s*0.42],[s*0.32,s*0.42],[-s*0.3,-s*0.42],[-s*0.3,s*0.42]];
+  pos.forEach(([lx,ly], i) => {
+    const sw = i % 2 === 0 ? swing : -swing;
+    ctx.save();
+    ctx.translate(lx + sw*s*0.28, ly);
+    ctx.rotate(sw*0.4);
+    organicPath(ctx, s*0.155, s*0.10, 21 + i*7, {
+      low: 0.035, high: 0.016,
+      bumps: [[-0.45, 0.20, 0.16], [0.0, 0.23, 0.17], [0.45, 0.20, 0.16]],
+    });
+    ctx.fillStyle = C.limb; ctx.fill();
+    organicStroke(ctx, C, Math.max(1, s*0.017));
+    // 趾缝（趾瓣之间向外，画到趾尖外）
+    ctx.strokeStyle = 'rgba(0,0,0,0.42)'; ctx.lineWidth = Math.max(0.9, s*0.013); ctx.lineCap = 'round';
+    [-0.24, 0.24].forEach((a) => {
+      ctx.beginPath(); ctx.moveTo(s*0.105, a*s*0.045);
+      ctx.lineTo(s*0.185, a*s*0.115); ctx.stroke();
+    });
+    // 关节褶线
+    ctx.beginPath(); ctx.moveTo(-s*0.05, -s*0.08); ctx.quadraticCurveTo(-s*0.10, 0, -s*0.05, s*0.08);
+    ctx.strokeStyle = 'rgba(0,0,0,0.30)'; ctx.lineWidth = Math.max(0.8, s*0.012); ctx.stroke();
+    ctx.restore();
+  });
+  // 头（手绘卵形：吻端略尖伸、后颊宽——黄喉蛇头状特征；中心后移衔接壳缘不断颈）
+  const bob = Math.sin(ph*0.66) * s * 0.03;
+  const hx = s*0.80, hy = bob;
+  ctx.save();
+  organicPath(ctx, s*0.215, s*0.16, 17, {
+    low: 0.034, high: 0.013,
+    bumps: [[0, 0.07, 0.5], [2.2, 0.025, 0.5], [-2.2, 0.025, 0.5]],  // 吻端伸 + 两颊微鼓
+  });
+  ctx.fillStyle = C.head; ctx.fill();
+  organicStroke(ctx, C, Math.max(1.1, s*0.024));
+  // [DEBUG] 头中心标记
+  ctx.fillStyle = 'rgba(255,0,0,0.95)'; ctx.fillRect(hx - 3, hy - 3, 6, 6);
+  // 黄纹
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath();
+    ctx.moveTo(hx - s*0.06, hy + sd*s*0.075);
+    ctx.quadraticCurveTo(hx + s*0.05, hy + sd*s*0.105, hx + s*0.17, hy + sd*s*0.065);
+    ctx.strokeStyle = C.yellow; ctx.lineWidth = s*0.05; ctx.lineCap = 'round'; ctx.stroke();
+  });
+  // 颈褶
+  ctx.strokeStyle = 'rgba(0,0,0,0.28)'; ctx.lineWidth = Math.max(0.8, s*0.011);
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath();
+    ctx.moveTo(hx - s*0.10, hy + sd*s*0.05);
+    ctx.quadraticCurveTo(hx - s*0.14, hy + sd*s*0.09, hx - s*0.09, hy + sd*s*0.13);
+    ctx.stroke();
+  });
+  // 头顶碎斑
+  const r = sRand(23);
+  ctx.fillStyle = 'rgba(0,0,0,0.20)';
+  for (let i = 0; i < 5; i++) {
+    ctx.beginPath();
+    ctx.ellipse(hx - s*0.02 + r()*s*0.14, hy - s*0.06 + r()*s*0.12,
+                s*0.014 + r()*s*0.012, s*0.010 + r()*s*0.008, r()*3, 0, Math.PI*2);
+    ctx.fill();
+  }
+  // 双眼
+  [-1, 1].forEach((sd) => {
+    ctx.beginPath(); ctx.arc(hx + s*0.095, hy + sd*s*0.088, Math.max(1.4, s*0.036), 0, Math.PI*2);
+    ctx.fillStyle = '#141210'; ctx.fill();
+    ctx.beginPath(); ctx.arc(hx + s*0.105, hy + sd*s*(0.088 - 0.012*sd) - s*0.012,
+                             Math.max(0.5, s*0.011), 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+  });
+  // 嘴缝
+  ctx.beginPath(); ctx.moveTo(hx + s*0.185, hy);
+  ctx.quadraticCurveTo(hx + s*0.14, hy + s*0.035, hx + s*0.09, hy + s*0.03);
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = Math.max(0.8, s*0.012); ctx.stroke();
+  ctx.restore();
+  shellRough(ctx, s, C);
+  // [DEBUG] 原点标记（壳中心）
+  ctx.fillStyle = 'rgba(0,0,255,0.95)'; ctx.fillRect(-3, -3, 6, 6);
+  // 尾（有机曲线：点列 + 平滑闭合）
+  ctx.save();
+  ctx.rotate(Math.sin(ph*0.8) * 0.08);
+  const rr = sRand(31);
+  const tp = [
+    [-s*0.50, -s*0.05], [-s*0.60, -s*0.085 + rr()*s*0.012], [-s*0.70, -s*0.05],
+    [-s*0.745, rr()*s*0.014], [-s*0.70, s*0.045], [-s*0.60, s*0.075 + rr()*s*0.012],
+    [-s*0.50, s*0.05],
+  ];
+  const mid2 = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  ctx.beginPath();
+  const tm0 = mid2(tp[tp.length - 1], tp[0]);
+  ctx.moveTo(tm0[0], tm0[1]);
+  for (let i = 0; i < tp.length; i++) {
+    const p = tp[i], q = tp[(i + 1) % tp.length], m2 = mid2(p, q);
+    ctx.quadraticCurveTo(p[0], p[1], m2[0], m2[1]);
+  }
+  ctx.closePath();
+  ctx.fillStyle = C.limb; ctx.fill();
+  organicStroke(ctx, C, Math.max(1, s*0.016));
+  ctx.restore();
+}
+
+// ── 渲染入口 ─────────────────────────────────────────────
+const STYLES = [
+  { key: 'base', n: 0, name: '现状基线', draw: drawBase,
+    desc: '当前线段风：渐变壳 + 3 条简单纵纹，无描边、单眼、圆点腿。作为对比参照。' },
+  { key: 'a', n: 'A', name: '硬朗描边 · 扁平图标', draw: drawA,
+    desc: '深褐轮廓线 + 盾片分块（椎盾/肋盾/缘盾环带）+ 缘盾辐射线 + 双眼双黄纹 + 趾蹼。<b>最干净、最省性能</b>，远看也清晰。' },
+  { key: 'b', n: 'B', name: '自然图鉴 · 细节增强', draw: drawB,
+    desc: 'A 的全部 + 生长纹虚弧 + 三条脊棱（暗线/受光成对）+ 颈褶 + 头顶碎斑 + 腿关节线。生物图鉴感，<b>细节与性能均衡</b>。' },
+  { key: 'c', n: 'C', name: '轻水彩 · 晕染质感', draw: drawC,
+    desc: 'B 的全部 + 固定种子晕染斑（不闪烁）+ 壳外两圈"洇纸"晕 + 左上高光弧带 + 手绘扰动轮廓 + 黄纹双层叠色。<b>最接近水彩立绘</b>。' },
+  { key: 'd', n: 'D', name: '墨线淡彩 · 钢笔淡彩', draw: drawD,
+    desc: '整体降饱和 + 深墨复笔描边 + 45° 排线阴影 + 黄纹墨线勾边。宣纸钢笔淡彩味，<b>与水色场景对比最强</b>。' },
+  { key: 'br', n: "B'", name: '自然图鉴 · 手绘轮廓 v3（B 打底）', draw: drawBR,
+    desc: '<b>选定方向迭代版</b>：壳外缘带 12 片缘盾棱波（真龟甲不是光滑椭圆）+ 低频歪扭 + 高频手抖 + 贝塞尔平滑；爪带 3 趾瓣与趾缝；复笔描边；生长纹有机虚线弧。' },
+];
+
+const rows = document.getElementById('rows');
+let animCtxs = [];
+STYLES.forEach((st) => {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `
+    <div class="num">${st.n}</div>
+    <div class="big"><canvas width="480" height="480"></canvas></div>
+    <div class="anim"><canvas width="460" height="280"></canvas></div>
+    <div class="desc"><h3>${st.n} · ${st.name}</h3><p>${st.desc}</p></div>`;
+  rows.appendChild(row);
+  const big = row.querySelector('.big canvas').getContext('2d');
+  const anim = row.querySelector('.anim canvas').getContext('2d');
+  // 静态大图（2x 分辨率，宣纸色衬底）
+  big.fillStyle = '#f2ead8'; big.fillRect(0, 0, 480, 480);
+  big.save(); big.translate(240, 240); st.draw(big, 140, 0.6); big.restore();
+  // [DEBUG] B' 头部像素取证：画完后立即读
+  if (st.key === 'br') {
+    const px = big.getImageData(335, 241, 1, 1).data;
+    window.__brHeadPx = px[0] + ',' + px[1] + ',' + px[2];
+    const px2 = big.getImageData(360, 230, 1, 1).data;
+    window.__brHeadPx2 = px2[0] + ',' + px2[1] + ',' + px2[2];
+  }
+  animCtxs.push({ ctx: anim, draw: st.draw });
+});
+
+// 动画小图：setInterval 驱动（无头 virtual-time 亦可见摆动）
+let ph = 0;
+function renderAnim() {
+  ph += 0.09;
+  animCtxs.forEach(({ ctx, draw }) => {
+    ctx.fillStyle = '#cfe3e6'; ctx.fillRect(0, 0, 460, 280);
+    ctx.save(); ctx.translate(150, 140); draw(ctx, 46, ph); ctx.restore();
+    ctx.save(); ctx.translate(345, 165); ctx.scale(-0.6, 0.6); draw(ctx, 46, ph*1.2); ctx.restore();
+    ctx.restore && ctx.restore();
+  });
+}
+renderAnim();
+setInterval(renderAnim, 33);
+
+// [DEBUG] 像素取证：B' 大图各区域平均色（头应在 rx 300~400 区域呈褐色）
+const dbg = document.createElement('div');
+dbg.id = 'pxreport';
+try {
+  const cvs = document.querySelectorAll('.big canvas');
+  const rect = cvs[5].getBoundingClientRect();
+  const c6 = cvs[5].getContext('2d');
+  // 头区域 (300..420, 195..285) 导出为 dataURL（浏览器眼中的真实画面）
+  const probe = document.createElement('canvas');
+  probe.width = 120; probe.height = 90;
+  probe.getContext('2d').drawImage(cvs[5], 300, 195, 120, 90, 0, 0, 120, 90);
+  // 横向颜色剖面：y=241，x 240→470
+  let scan = '';
+  for (let x = 240; x <= 470; x += 10) {
+    const d = c6.getImageData(x, 241, 1, 1).data;
+    const r = d[0], g = d[1], b = d[2];
+    let c = '?';
+    if (r > 235 && g > 225) c = '.';
+    else if (r < 100 && g < 100) c = 'k';
+    else if (r > 200 && g > 190 && b < 130) c = 'y';
+    else if (r > 200 && g < 130) c = 'R';
+    else c = 'B';
+    scan += c;
+  }
+  window.__scan = scan;
+  window.__headDump = probe.toDataURL('image/png');
+  // [DEBUG] 同函数独立 canvas 最小复现
+  const tcv = document.createElement('canvas');
+  tcv.width = 200; tcv.height = 200;
+  const tctx = tcv.getContext('2d');
+  tctx.fillStyle = '#fff'; tctx.fillRect(0, 0, 200, 200);
+  tctx.save(); tctx.translate(100, 100);
+  organicPath(tctx, 140*0.215, 140*0.16, 17, { low: 0.034, high: 0.013, bumps: [[0, 0.07, 0.5], [2.2, 0.025, 0.5], [-2.2, 0.025, 0.5]] });
+  tctx.fillStyle = '#8a8040'; tctx.fill();
+  tctx.strokeStyle = '#3a3122'; tctx.lineWidth = 3; tctx.stroke();
+  tctx.restore();
+  const mp = tctx.getImageData(100, 100, 1, 1).data;
+  window.__miniPx = mp[0] + ',' + mp[1] + ',' + mp[2];
+  // [DEBUG] mini2：先画 4 条腿（复刻 drawBR 腿循环）再画头
+  const t2 = document.createElement('canvas');
+  t2.width = 200; t2.height = 200;
+  const q = t2.getContext('2d');
+  q.fillStyle = '#fff'; q.fillRect(0, 0, 200, 200);
+  q.save(); q.translate(100, 100);
+  const s2 = 140, swing = Math.sin(0.6) * 0.5;
+  [[s2*0.32,-s2*0.42],[s2*0.32,s2*0.42],[-s2*0.3,-s2*0.42],[-s2*0.3,s2*0.42]].forEach(([lx,ly], i) => {
+    const sw = i % 2 === 0 ? swing : -swing;
+    q.save(); q.translate(lx + sw*s2*0.28, ly); q.rotate(sw*0.4);
+    organicPath(q, s2*0.155, s2*0.10, 21 + i*7, { low: 0.035, high: 0.016, bumps: [[-0.45, 0.20, 0.16], [0.0, 0.23, 0.17], [0.45, 0.20, 0.16]] });
+    q.fillStyle = '#5f5230'; q.fill();
+    organicStroke(q, YT, Math.max(1, s2*0.017));
+    q.restore();
+  });
+  organicPath(q, s2*0.215, s2*0.16, 17, { low: 0.034, high: 0.013, bumps: [[0, 0.07, 0.5], [2.2, 0.025, 0.5], [-2.2, 0.025, 0.5]] });
+  q.fillStyle = '#8a8040'; q.fill();
+  q.strokeStyle = '#3a3122'; q.lineWidth = 3; q.stroke();
+  q.restore();
+  const mp2 = q.getImageData(100 + 0.80*140 - 100 + 100, 100, 1, 1).data; // 头中心 (112,0)→(112,100)
+  window.__mini2Px = mp2[0] + ',' + mp2[1] + ',' + mp2[2];
+  const avg = (x0, x1, y0, y1) => {
+    const d = c6.getImageData(x0, y0, x1 - x0, y1 - y0).data;
+    let r = 0, g = 0, b = 0; const n = d.length / 4;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
+    return `rgb(${Math.round(r/n)},${Math.round(g/n)},${Math.round(b/n)})`;
+  };
+  dbg.textContent = [
+    'rect: ' + Math.round(rect.left) + ',' + Math.round(rect.top) + ' ' + Math.round(rect.width) + 'x' + Math.round(rect.height),
+    'head-core(330..355,228..252): ' + avg(330, 355, 228, 252),
+    'immediate(335,241): ' + (window.__brHeadPx || 'n/a') + ' / immediate(360,230): ' + (window.__brHeadPx2 || 'n/a'),
+    'mini-canvas-head(100,100): ' + (window.__miniPx || 'n/a'),
+    'mini2-with-legs(112,100): ' + (window.__mini2Px || 'n/a'),
+    'scan@y241 x240..470: ' + (window.__scan || 'n/a'),
+    'DUMP:' + (window.__headDump || ''),
+  ].join(' | ');
+} catch (e) { dbg.textContent = 'pxerr: ' + e.message; }
+document.body.appendChild(dbg);
+</script>
+</body>
+</html>

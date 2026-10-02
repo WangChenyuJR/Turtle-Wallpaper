@@ -114,6 +114,19 @@ export class CreaturePanel {
     return inst._uid;
   }
 
+  /**
+   * 读档后把 uid 计数器抬到已用过的最大值之上，
+   * 避免新建个体拿到与存档中已有生物相同的 uid（→ 名字串号）。
+   */
+  syncSeqFromInstances() {
+    let max = this._seq;
+    for (const inst of [...this.app.fishes, ...this.app.turtles]) {
+      if (inst._uid && inst._uid > max) max = inst._uid;
+    }
+    if (max !== this._seq) { this._seq = max; this._saveSeq(); }
+    return this._seq;
+  }
+
   // ── DOM ───────────────────────────────────────────────
   _buildDOM() {
     const style = document.createElement('style');
@@ -159,6 +172,8 @@ export class CreaturePanel {
     if (name && name !== this._defaultName()) this._names[uid] = name;
     else delete this._names[uid];
     this._saveNames();
+    // 名字属于存档的一部分：改名后立刻落一次盘
+    this.app?.save?.touch();
   }
 
   // ── 图片 ──────────────────────────────────────────────

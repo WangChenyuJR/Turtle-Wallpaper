@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>阶段6-② 选品种面板 测试</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { FISH_SPECIES, TURTLE_SPECIES } from './src/species.js';
+    import { PLANT_SPECIES } from './src/plants.js';
+
+    // 忽略已有存档，从干净水塘开始（不动用户档）
+    const log = [];
+    let pass = 0, fail = 0;
+    const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => [...document.querySelectorAll(sel)];
+
+    /** 模拟一次真实的左键点击（走 window mousedown 监听） */
+    const click = (x, y) => window.dispatchEvent(new MouseEvent('mousedown', {
+      button: 0, clientX: x, clientY: y, bubbles: true,
+    }));
+    const key = (k) => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+    /** 找一个没有生物的空点（避开发射位被刚放下的龟挡住） */
+    const emptySpot = (x, y) => {
+      const app = window.pondApp;
+      for (let r = 0; r < 400; r += 24) {
+        for (const [dx, dy] of [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r], [r, r], [-r, -r], [r, -r], [-r, r]]) {
+          const px = x + dx, py = y + dy;
+          if (px < 20 || py < 20 || px > app.world.w - 20 || py > app.world.h - 20) continue;
+          if (!app.panel.hitTest(px, py)) return [px, py];
+        }
+      }
+      return [x, y];
+    };
+
+    setTimeout(() => {
+      try {
+        const app = window.pondApp;
+        const picker = app.picker;
+        const W = app.world;
+        const nFish = () => app.fishes.length;
+        const nTurtle = () => app.turtles.length;
+        const nPlant = () => app.plants.plants.length;
+
+        ok(!!app, '场景已初始化');
+        ok(!!picker, '选品种面板已挂载');
+
+        // ── 1. 初始状态：面板关闭 ──────────────────────
+        ok(picker.open === false, '初始面板是关闭的');
+        ok(!$('#speciesPicker').classList.contains('sp-open'), '初始 DOM 不带 sp-open');
+
+        // ── 2. 点画布空白 → 面板打开并记住投放点 ───────
+        const [cx, cy] = emptySpot(Math.round(W.w * 0.5), Math.round((W.bankY + W.marshY) / 2));
+        click(cx, cy);
+        ok(picker.open === true, '点空白后面板已打开');
+        ok(picker.x === cx && picker.y === cy, `投放点 = 点击处 (${cx},${cy})`);
+        ok($('#speciesPicker').classList.contains('sp-open'), 'DOM 加上 sp-open');
+
+        // 面板位置落在视口内
+        const lx = parseFloat($('#speciesPicker').style.left);
+        const ly = parseFloat($('#speciesPicker').style.top);
+        ok(lx >= 0 && lx < W.w && ly >= 0 && ly < W.h, `面板定位在视口内 (${lx},${ly})`);
+
+        // ── 3. 面板列全了所有品种 ──────────────────────
+        const items = $$('#speciesPicker .sp-item');
+        const fishItems = $$('#speciesPicker .sp-item[data-kind="fish"]');
+        const turtleItems = $$('#speciesPicker .sp-item[data-kind="turtle"]');
+        const plantItems = $$('#speciesPicker .sp-item[data-kind="plant"]');
+        ok(fishItems.length === Object.keys(FISH_SPECIES).length,
+           `鱼品种按钮 ${Object.keys(FISH_SPECIES).length} 个（实际 ${fishItems.length}）`);
+        ok(turtleItems.length === Object.keys(TURTLE_SPECIES).length,
+           `龟品种按钮 ${Object.keys(TURTLE_SPECIES).length} 个（实际 ${turtleItems.length}）`);
+        ok(plantItems.length === Object.keys(PLANT_SPECIES).length,
+           `植物品种按钮 ${Object.keys(PLANT_SPECIES).length} 个（实际 ${plantItems.length}）`);
+        ok(items.length === fishItems.length + turtleItems.length + plantItems.length,
+           `三组之和 = 全部按钮（${items.length}）`);
+        const groups = $$('#speciesPicker .sp-gtitle').length;
+        ok(groups >= 5, `分组标题 ≥5（鱼/龟 + 植物三层，实际 ${groups}）`);
+
+        // ── 4. 点品种 → 在投放点加 1 条鱼 ──────────────
+        const f0 = nFish();
+        const koItem = $('#speciesPicker .sp-item[data-kind="fish"][data-id="koi"]');
+        koItem.click();
+        ok(nFish() === f0 + 1, `点「锦鲤」→ 鱼 +1（${f0} → ${nFish()}）`);
+        const newFish = app.fishes[app.fishes.length - 1];
+        ok(newFish.species.id === 'koi', '新品种正是锦鲤');
+        const dfx = Math.abs(newFish.x - cx), dfy = Math.abs(newFish.y - cy);
+        ok(dfx < 40 && dfy < 40, `鱼落在点击处附近（偏移 ${dfx.toFixed(0)},${dfy.toFixed(0)}）`);
+        ok(W.isWater(newFish.x, newFish.y), '鱼被约束在水面内');
+
+        // ── 5. 连续点击不重复弹面板，可连续投放 ────────
+        const koiItem2 = $('#speciesPicker .sp-item[data-kind="fish"][data-id="koi"]');
+        koiItem2.click();
+        koiItem2.click();
+        ok(nFish() === f0 + 3, `连点 3 次共加 3 条（${nFish()}）`);
+
+        // ── 6. 数量角标实时更新 ────────────────────────
+        const badge = $('#speciesPicker .sp-item[data-kind="fish"][data-id="koi"] .sp-badge');
+        const expectKoi = app.population().fish.koi;
+        ok(!!badge && badge.textContent === `×${expectKoi}`,
+           `角标显示 ×${expectKoi}（实际 ${badge?.textContent}）`);
+
+        // ── 7. 在水中点龟 → 游动状态 ───────────────────
+        const t0 = nTurtle();
+        $('#speciesPicker .sp-item[data-kind="turtle"][data-id="redear"]').click();
+        ok(nTurtle() === t0 + 1, `点「巴西红耳龟」→ 龟 +1（${t0} → ${nTurtle()}）`);
+        const newTurtle = app.turtles[app.turtles.length - 1];
+        ok(newTurtle.species.id === 'redear', '新品种正是巴西红耳龟');
+        ok(newTurtle.state === 'swim', `水里投放 → 状态 swim（实际 ${newTurtle.state}）`);
+        ok(W.isWater(newTurtle.x, newTurtle.y), '龟被放在水域内');
+
+        // ── 8. 在岸上点龟 → 直接趴着晒背 ───────────────
+        const [bx, by] = emptySpot(Math.round(W.w * 0.3), Math.round(W.bankY * 0.4));
+        click(bx, by);
+        ok(picker.x === bx && picker.y === by, '投放点已移动到新点击处');
+        const t1 = nTurtle();
+        $('#speciesPicker .sp-item[data-kind="turtle"][data-id="chinese"]').click();
+        ok(nTurtle() === t1 + 1, '岸上投放成功');
+        const landTurtle = app.turtles[app.turtles.length - 1];
+        ok(landTurtle.state === 'bask', `岸上投放 → 状态 bask（实际 ${landTurtle.state}）`);
+        ok(landTurtle.y <= W.bankLineAt(landTurtle.x), '落在岸线之上（陆地）');
+
+        // ── 9. 在岸上点草 → 贴在岸线 ───────────────────
+        const p0 = nPlant();
+        const [rx, ry] = emptySpot(Math.round(W.w * 0.7), Math.round(W.bankY * 0.5));
+        click(rx, ry);
+        $('#speciesPicker .sp-item[data-kind="plant"][data-id="reed"]').click();
+        ok(nPlant() === p0 + 1, `点「芦苇」→ 植物 +1（${p0} → ${nPlant()}）`);
+        const reed = app.plants.plants[app.plants.plants.length - 1];
+        ok(reed.sp.id === 'reed', '新植株正是芦苇');
+        ok(Math.abs(reed.x - rx) < 20, `芦苇落在点击的 x 附近（${reed.x.toFixed(0)} vs ${rx}）`);
+        ok(reed.y <= W.bankLineAt(reed.x) + 2, '芦苇贴在岸线之上（陆地）');
+
+        // ── 10. 在水里点浮叶 → 落到水面浅水区 ──────────
+        const [sx, sy] = emptySpot(Math.round(W.w * 0.4), Math.round((W.bankY + W.marshY) / 2));
+        click(sx, sy);
+        const p1 = nPlant();
+        $('#speciesPicker .sp-item[data-kind="plant"][data-id="lilypad"]').click();
+        ok(nPlant() === p1 + 1, '点「睡莲」→ 植物 +1');
+        const pad = app.plants.plants[app.plants.plants.length - 1];
+        ok(pad.sp.id === 'lilypad' && pad.kind === 'surface', '睡莲归到浮叶层');
+        ok(W.isWater(pad.x, pad.y) || pad.y > W.bankLineAt(pad.x), '睡莲落在水面上（非岸边）');
+
+        // ── 11. 沉水植物 → 贴泥沼线 ────────────────────
+        const p2 = nPlant();
+        $('#speciesPicker .sp-item[data-kind="plant"][data-id="eelgrass"]').click();
+        ok(nPlant() === p2 + 1, '点「水草」→ 植物 +1');
+        const eg = app.plants.plants[app.plants.plants.length - 1];
+        ok(eg.kind === 'submerged', '水草归到沉水层');
+        ok(eg.y >= W.marshLineAt(eg.x) - 30, '水草贴着泥沼线生长');
+
+        // ── 12. 面板点品种不会误投喂 ───────────────────
+        const food0 = app.food.aliveCount;
+        $('#speciesPicker .sp-item[data-kind="fish"][data-id="goldfish"]').click();
+        ok(app.food.aliveCount === food0, `面板内点击不撒饲料（${food0} → ${app.food.aliveCount}）`);
+
+        // ── 13. 点龟/鱼本身 → 走信息卡，并收起选品种面板 ─
+        const sel = app.turtles[0];
+        click(Math.round(sel.x), Math.round(sel.y));
+        ok(app.panel.selected === sel, '点中乌龟 → 打开生物信息卡');
+        ok(picker.open === false, '看信息卡时选品种面板已收起');
+        const food1 = app.food.aliveCount;
+        ok(app.food.aliveCount === food1, '点中生物不会投喂');
+
+        // ── 14. Esc 关闭两个面板 ───────────────────────
+        app.panel.close();
+        const [ex, ey] = emptySpot(Math.round(W.w * 0.5), Math.round((W.bankY + W.marshY) / 2));
+        click(ex, ey);
+        ok(picker.open === true, '重新点空白 → 面板再开');
+        key('Escape');
+        ok(picker.open === false, 'Esc 关闭选品种面板');
+
+        // ── 15. A 键开关 ───────────────────────────────
+        key('a');
+        ok(picker.open === true, 'A 键打开面板');
+        key('a');
+        ok(picker.open === false, 'A 键再按关闭面板');
+
+        // ── 16. 控制台 API 与上限保护 ──────────────────
+        ok(typeof window.pond.spawnAt === 'function', '控制台 API pond.spawnAt 已就绪');
+        const g0 = nFish();
+        window.pond.spawnAt('fish', 'koi', 400, 500);
+        ok(nFish() === g0 + 1, 'pond.spawnAt 直接投放可用');
+        ok(window.pond.spawnAt('fish', '不存在', 400, 500) === null, '未知品种返回 null 不崩');
+
+        // 龟上限保护（CONFIG.growth.turtleCap）
+        const cap = window.pond.eco().caps.turtle;
+        while (app.turtles.length < cap) app.addTurtle();
+        const atCap = app.turtles.length;
+        ok(app.addTurtleAt('redear', 400, 500) === null, `龟到上限（${cap}）拒绝投放`);
+
+        // ── 17. 长跑无 NaN ─────────────────────────────
+        for (let i = 0; i < 300; i++) app._update(1 / 60, i / 60);
+        const bad = [...app.fishes, ...app.turtles, ...app.plants.plants]
+          .filter((o) => !Number.isFinite(o.x) || !Number.isFinite(o.y));
+        ok(bad.length === 0, `300 步长跑后无 NaN 坐标（异常 ${bad.length}）`);
+
+        log.push('');
+        log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+      }
+      document.getElementById('report').textContent = log.join('\n');
+      window.__TEST_DONE__ = true;
+    }, 700);
+  </script>
+</body>
+</html>

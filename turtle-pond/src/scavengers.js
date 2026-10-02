@@ -101,6 +101,7 @@ export class Snail {
     this._place();
     this.target = null;            // 正在啃的遗骸
     this.restTimer = rand(1, 4);
+    this._nibbleTimer = rand(0.3, 0.8);   // 啃食冷却（防每帧一口瞬间啃光）
   }
 
   _place() {
@@ -139,8 +140,12 @@ export class Snail {
         this.x += (dx / d) * this.speed * dt;
         this.y += (dy / d) * this.speed * dt;
       } else {
-        // 到嘴边：啃
-        this.target.nibble(0.05 + Math.random() * 0.03);
+        // 到嘴边：啃（限频，约每 0.5~1s 一口）
+        this._nibbleTimer -= dt;
+        if (this._nibbleTimer <= 0) {
+          this._nibbleTimer = rand(0.5, 1.0);
+          this.target.nibble(0.05 + Math.random() * 0.03);
+        }
       }
       this.dir = dx >= 0 ? 1 : -1;
     } else {

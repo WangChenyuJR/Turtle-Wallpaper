@@ -1,5 +1,16 @@
 {
   "_comment": "Lively 设置面板。品种数量由 species 字段控制（见下），此处暴露常用项。",
+  "_saveComment": "存档：龟/鱼/植物/螺虾/蛋/昼夜/天气的完整状态自动保存（30秒一次 + 关闭时一次），关掉壁纸再打开即继续上次的水塘。",
+  "saveEnabled": {
+    "type": "checkbox",
+    "text": "存档：记住水塘状态（关掉再打开继续）",
+    "value": true
+  },
+  "resetPond": {
+    "type": "checkbox",
+    "text": "重新开始（清空存档，从新水塘开始）",
+    "value": false
+  },
   "fishCount": {
     "type": "slider",
     "text": "小鱼总数",

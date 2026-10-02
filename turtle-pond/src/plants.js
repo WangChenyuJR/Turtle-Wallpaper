@@ -139,6 +139,9 @@ export class Plant {
   constructor(world, species, zone) {
     this.world = world;
     this.sp = species;
+    // 与鱼/龟统一叫法（fish.species / turtle.species）——两处都保留，
+    // 谁引用都不会拿到 undefined（老代码用 .sp，新代码建议用 .species）
+    this.species = species;
     this.kind = species.kind;
     this.zone = zone;                  // 'bank' | 'surface' | 'submerged'
 
@@ -397,6 +400,44 @@ export class PlantField {
         this.plants.push(new Plant(this.world, sp, zone));
       }
     }
+  }
+
+  /**
+   * 单株投放（"添加植物"用）——把点击位置吸附到该品种应处的层：
+   *   bank      岸边：贴该 x 处的岸线，往上长
+   *   surface   浮叶：落在这段水面的浅水区
+   *   submerged 沉水：贴该 x 处的泥沼线，往上飘
+   * @param {string} id 品种 id
+   * @param {number} x 点击的 x
+   * @param {number} [y] 点击的 y（仅浮叶参考深度）
+   * @returns {Plant|null}
+   */
+  addPlant(id, x, y) {
+    const sp = PLANT_SPECIES[id];
+    if (!sp) return null;
+    const W = this.world;
+    const zone = sp.kind === 'bank' ? 'bank' : (sp.kind === 'surface' ? 'surface' : 'submerged');
+    const p = new Plant(W, sp, zone);
+    const cx = clamp(x, 8, W.w - 8);
+    if (sp.kind === 'bank') {
+      p.x = cx;
+      p.y = W.bankLineAt(cx) - rand(2, 16);
+      p.height = rand(sp.height[0], sp.height[1]) * p.scale;
+    } else if (sp.kind === 'surface') {
+      const top = W.bankLineAt(cx), bot = W.marshLineAt(cx);
+      p.x = cx;
+      // 落在点击的深度上，但夹在靠岸浅水区（8%~46%）
+      const t = clamp((y - top) / Math.max(1, bot - top), 0.08, 0.46);
+      p.y = clamp(top + (bot - top) * t, top + 10, bot - 20);
+      p.size = rand(sp.size[0], sp.size[1]) * p.scale;
+      p.hasFlower = Math.random() < 0.45;
+    } else {
+      p.x = cx;
+      p.y = W.marshLineAt(cx) - rand(4, 26);
+      p.height = rand(sp.height[0], sp.height[1]) * p.scale;
+    }
+    this.plants.push(p);
+    return p;
   }
 
   /** 分层：岸边植物最靠后画，浮叶在最前 */

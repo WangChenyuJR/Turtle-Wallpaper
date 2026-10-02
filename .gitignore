@@ -16,6 +16,11 @@ _*.txt
 _*.log
 _*.html.bak
 
+# 一次性调试脚本与无头浏览器输出（不可复现流程，勿入库）
+turtle-pond/_dump_out.html
+turtle-pond/_style_probe.html
+turtle-pond/_shot_*.html
+
 # ── 编辑器与系统 ──
 .vscode/
 .idea/

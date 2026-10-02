@@ -17,27 +17,33 @@
   <canvas id="pond"></canvas>
   <div id="report">运行中…</div>
   <script type="module" src="./src/main.js"></script>
-  <script>
+  <script type="module">
+    import { DEFAULT_POPULATION, TURTLE_SPECIES, FISH_SPECIES } from './src/species.js';
+    import { CONFIG } from './src/config.js';
+
     // 等场景初始化后跑一轮物种 API 测试
     setTimeout(() => {
       const log = [];
       const ok = (c, m) => log.push((c ? '✅ ' : '❌ ') + m);
+      const sum = (o) => Object.values(o ?? {}).reduce((a, b) => a + b, 0);
       try {
         const app = window.pondApp;
         ok(!!app, '场景已初始化');
         ok(!!window.pond, '控制台 API 已挂载');
 
-        // 1) 初始种群（应来自 DEFAULT_POPULATION / LivelyProperties）
+        // 1) 初始种群（应来自 DEFAULT_POPULATION）
         const p0 = window.pond.population();
         log.push('   初始 fish = ' + JSON.stringify(p0.fish));
         log.push('   初始 turtle = ' + JSON.stringify(p0.turtle));
-        ok(app.fishes.length === 14, `初始鱼数 14（实际 ${app.fishes.length}）`);
-        ok(app.turtles.length === 2, `初始龟数 2（实际 ${app.turtles.length}）`);
+        const wantFish = sum(DEFAULT_POPULATION.fish);
+        const wantTurtle = sum(DEFAULT_POPULATION.turtle);
+        ok(app.fishes.length === wantFish, `初始鱼数 ${wantFish}（实际 ${app.fishes.length}）`);
+        ok(app.turtles.length === wantTurtle, `初始龟数 ${wantTurtle}（实际 ${app.turtles.length}）`);
 
-        // 2) 品种列表
+        // 2) 品种列表（与 species.js 注册表动态对齐）
         const sp = window.pond.species();
-        ok(sp.fish.length === 6, `鱼品种 6 个（实际 ${sp.fish.length}）`);
-        ok(sp.turtle.length === 7, `龟品种 7 个（实际 ${sp.turtle.length}，阶段5-① 新增枯叶龟/缅甸陆龟）`);
+        ok(sp.fish.length === Object.keys(FISH_SPECIES).length, `鱼品种 ${Object.keys(FISH_SPECIES).length} 个（实际 ${sp.fish.length}）`);
+        ok(sp.turtle.length === Object.keys(TURTLE_SPECIES).length, `龟品种 ${Object.keys(TURTLE_SPECIES).length} 个（实际 ${sp.turtle.length}）`);
 
         // 3) 按品种添加
         window.pond.addFish(3, 'koi');

@@ -15,25 +15,40 @@ import { CONFIG } from './config.js';
 import { World } from './world.js';
 import { Fish } from './fish.js';
 import { Turtle, Egg } from './turtle.js';
-import { DuckweedField } from './duckweed.js';
-import { FoodManager } from './food.js';
-import { PlantField, PLANT_SPECIES, DEFAULT_PLANTS } from './plants.js';
+import { DuckweedField, Duckweed } from './duckweed.js';
+import { FoodManager, Food } from './food.js';
+import { PlantField, Plant, PLANT_SPECIES, DEFAULT_PLANTS } from './plants.js';
 import { DayNight } from './daynight.js';
 import { Weather } from './weather.js';
 import { LifeArchive, KIND_LABELS, CAUSE_LABELS } from './afterlife.js';
-import { Remains, ScavengerField } from './scavengers.js';
+import { Remains, ScavengerField, Snail, Shrimp } from './scavengers.js';
 import { CreaturePanel } from './panel.js';
+import { SpeciesPicker } from './species-picker.js';
+import { SaveManager, SAVE_KEY, SCHEMA as SAVE_SCHEMA } from './save.js';
 import {
   DEFAULT_POPULATION, FISH_SPECIES, TURTLE_SPECIES,
   pickFishSpecies, pickTurtleSpecies, listSpecies, HABITAT_LABELS,
 } from './species.js';
-import { dist2 } from './utils.js';
+import { dist2, clamp } from './utils.js';
 
 class PondApp {
-  constructor(population = DEFAULT_POPULATION) {
+  /**
+   * @param {object} population 初始种群配置（读档失败时的回退）
+   * @param {object} [opts] { resume: boolean } resume=false 强制开新水塘（忽略存档）
+   */
+  constructor(population = DEFAULT_POPULATION, opts = {}) {
     this.canvas = document.getElementById('pond');
     this.ctx = this.canvas.getContext('2d');
     this.world = new World(window.innerWidth, window.innerHeight);
+
+    // ── 存档系统需要的构造器引用（save.js 不直接 import 各实体，避免循环依赖）──
+    this.FishCtor = Fish; this.TurtleCtor = Turtle; this.EggCtor = Egg;
+    this.PlantCtor = Plant; this.RemainsCtor = Remains;
+    this.SnailCtor = Snail; this.ShrimpCtor = Shrimp;
+    this.DuckweedCtor = Duckweed; this.FoodCtor = Food;
+    this.settings = { persist: CONFIG.life?.persist ?? true, saveEnabled: true };
+    this.save = new SaveManager(this);
+    this.resumed = false;      // 本次是否为"读档继续"
 
     this.fishes = [];
     this.turtles = [];
@@ -55,6 +70,8 @@ class PondApp {
     this.showArchive = false;
     // 生物信息面板（点击鱼/龟查看详情/改名/三视图）
     this.panel = new CreaturePanel(this);
+    // 选品种面板（阶段 6-②：添加鱼/龟/草时可选种类）
+    this.picker = new SpeciesPicker(this);
     this.time = 0;
 
     this.cursor = { x: 0, y: 0, active: false };
@@ -62,20 +79,44 @@ class PondApp {
     this.showHelp = true;
     this.showStats = true;
     this.showLegend = false;
+    this._toastText = '';
+    this._toastTimer = 0;
     this.lastTime = performance.now();
     this.visible = true;
     this._fpsAccum = 0;
     this._fpsFrames = 0;
     this._curFps = 60;
 
-    this._initScene(population);
+    this._initScene(population, opts.resume !== false);
     this._bindEvents();
 
     requestAnimationFrame((t) => this._loop(t));
   }
 
-  /** 依据种群配置生成生物（阶段 3：数据驱动） */
-  _initScene(population = DEFAULT_POPULATION) {
+  /**
+   * 初始化场景（阶段 3：数据驱动）
+   * @param {object} population 种群配置
+   * @param {boolean} tryResume 是否尝试从存档恢复（默认 true）
+   */
+  _initScene(population = DEFAULT_POPULATION, tryResume = true) {
+    // ── 优先读档：把上次离开时的世界整份还原 ────────────
+    if (tryResume && this.save.restore()) {
+      this.resumed = true;
+      const s = this.save.summarize();
+      console.log('[🐢 乌龟水塘] 已读取存档：',
+        `${s.fish} 鱼 / ${s.turtle} 龟 / ${s.plant} 植物 / 累计 ${s.playTime}`,
+        `（存档于 ${s.savedAt}）`);
+      // 让"命名"系统的 uid 计数器避开存档里已用的 uid
+      this.panel?.syncSeqFromInstances();
+      this.save.touch();
+      return;
+    }
+    // ── 没有存档（或版本不符）→ 按配置新建 ─────────────
+    this._spawnPopulation(population);
+  }
+
+  /** 按种群配置从零生成生物 */
+  _spawnPopulation(population = DEFAULT_POPULATION) {
     // 鱼
     for (const [spId, n] of Object.entries(population.fish ?? {})) {
       const sp = FISH_SPECIES[spId];
@@ -92,6 +133,32 @@ class PondApp {
     }
     // 挂产蛋回调（阶段 5-③）
     this._hookTurtleRepro();
+  }
+
+  // ── 供 save.js 使用的品种查询（品种被删除时返回 null）──
+  _fishSpeciesById(id) { return FISH_SPECIES[id] ?? null; }
+  _turtleSpeciesById(id) { return TURTLE_SPECIES[id] ?? null; }
+  _plantSpeciesById(id) { return PLANT_SPECIES[id] ?? null; }
+
+  /**
+   * 该品种是否有水彩立绘（assets/creatures/<kind>/<id>_side.png）
+   * 探测结果缓存在 CreaturePanel 的缓存里，避免"有图品种"被降级成色块。
+   */
+  _hasCreatureImage(kind, id) {
+    const cache = this.panel?._imgCache;
+    if (!cache) return true;
+    for (const view of ['side', 'top']) {
+      let img = cache.get(`${kind}:${id}:${view}`);
+      if (!img) {
+        img = new Image();
+        img.src = `assets/creatures/${kind}/${id}_${view}.png`;
+        img.onerror = () => { img._failed = true; };
+        cache.set(`${kind}:${id}:${view}`, img);
+      }
+      if (img.complete) { if (img.naturalWidth > 0 && !img._failed) return true; }
+      else if (!img._failed) return true;   // 还没加载完 → 先按"有"处理
+    }
+    return false;
   }
 
   /** 给每只龟挂上产蛋回调（新加的龟也要挂） */
@@ -135,11 +202,17 @@ class PondApp {
     });
     window.addEventListener('mouseleave', () => { this.cursor.active = false; });
 
-    // 左键：先看是否点中生物（打开信息面板），点空白则投喂
+    // 左键：点中生物 → 信息卡；点空白 → 投喂 + 弹出「选品种」面板（记住投放点）
     window.addEventListener('mousedown', (e) => {
       if (e.button === 0) {
-        if (this.panel.handleCanvasClick(e.clientX, e.clientY)) return;
+        if (this.panel.handleCanvasClick(e.clientX, e.clientY)) {
+          this.picker.close();          // 选生物看资料时，收起选品种面板
+          return;
+        }
         this.food.feed(e.clientX, e.clientY);
+        // 弹出/移动「选品种」面板，记下这次点击的位置作为投放点
+        this.picker.showAt(e.clientX, e.clientY);
+        this.save.touch();
       } else if (e.button === 2) {
         this.showHelp = !this.showHelp;
       }
@@ -148,6 +221,10 @@ class PondApp {
 
     // 键盘
     window.addEventListener('keydown', (e) => {
+      // 正在面板里改名（输入框）→ 不抢按键，否则打不出 s / w / t 等字母
+      const el = e.target;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+
       switch (e.key.toLowerCase()) {
         case ' ':
           this.paused = !this.paused;
@@ -168,6 +245,10 @@ class PondApp {
           break;
         case 't':
           this.addTurtle();
+          break;
+        case 'a':
+          // 选品种面板：A 键开关（打开时以屏幕中心为投放点）
+          this.picker.toggle();
           break;
         case 'l':
           this.showLegend = !this.showLegend;
@@ -190,8 +271,25 @@ class PondApp {
           // 生命档案面板
           this.showArchive = !this.showArchive;
           break;
+        case 's':
+          // 存档：S = 立即存档；Shift+S = 导出 JSON 文件（阶段 6-①）
+          if (e.shiftKey) this._toast(`📦 已导出 ${this.exportSave()}`);
+          else {
+            const r = this.saveNow();
+            this._toast(r.ok ? '💾 已存档' : `⚠️ 存档失败（${r.error ?? '未知'}）`);
+          }
+          break;
+        case 'r':
+          // 重新开始：需 Shift 防误触；清档前提示可恢复
+          if (e.shiftKey) {
+            this.newGame(false);
+            this._toast('🔄 已清档，3 秒后重开…（pond.undoReset() 可恢复）');
+            setTimeout(() => location.reload(), 3000);
+          }
+          break;
         case 'escape':
           this.panel.close();
+          this.picker.close();
           break;
         // 数字键 1~6 → 按品种添加鱼
         case '1': case '2': case '3': case '4': case '5': case '6': {
@@ -220,6 +318,7 @@ class PondApp {
     const sp = speciesId ? FISH_SPECIES[speciesId] : null;
     if (speciesId && !sp) console.warn('[pond] 未知鱼品种:', speciesId);
     for (let i = 0; i < n; i++) this.fishes.push(new Fish(this.world, sp, opts));
+    this.save.touch();
   }
 
   /** 移除小鱼（可按品种精确移除） */
@@ -232,6 +331,7 @@ class PondApp {
       } else if (idx < 0) break;
       this.fishes.splice(idx, 1);
     }
+    this.save.touch();
   }
 
   /**
@@ -246,6 +346,7 @@ class PondApp {
     const t = new Turtle(this.world, this.turtles.length, sp, opts);
     t.onLayEggs = (turtle) => this._turtleLayEggs(turtle);
     this.turtles.push(t);
+    this.save.touch();
     return t;
   }
 
@@ -258,6 +359,7 @@ class PondApp {
       } else if (idx < 0) break;
       this.turtles.splice(idx, 1);
     }
+    this.save.touch();
   }
 
   /** 统计当前种群（品种 → 数量） */
@@ -292,7 +394,149 @@ class PondApp {
     this.turtles.length = 0;
     this.eggs.length = 0;
     this.remains.length = 0;
-    this._initScene(pop);
+    this._spawnPopulation(pop);
+    this.save.touch();
+  }
+
+  // ── 「选品种」投放（阶段 6-②）─────────────────────────
+  /**
+   * 投放一只/一株到指定位置 —— 选品种面板的落点
+   * @param {'fish'|'turtle'|'plant'} kind
+   * @param {string} id 品种 id
+   * @param {number} x 画布坐标
+   * @param {number} y
+   * @returns {object|null} 新建的实例（失败/超上限返回 null）
+   */
+  spawnAt(kind, id, x, y) {
+    if (kind === 'fish') return this.addFishAt(id, x, y);
+    if (kind === 'turtle') return this.addTurtleAt(id, x, y);
+    if (kind === 'plant') return this.addPlantAt(id, x, y);
+    console.warn('[pond] 未知类别:', kind);
+    return null;
+  }
+
+  /**
+   * 在点击处加一条鱼（不传坐标则按默认随机位置）
+   * @param {string} speciesId
+   * @param {number} [x]
+   * @param {number} [y]
+   */
+  addFishAt(speciesId, x, y) {
+    const sp = FISH_SPECIES[speciesId];
+    if (!sp) { console.warn('[pond] 未知鱼品种:', speciesId); return null; }
+    const f = new Fish(this.world, sp);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      const p = this.world.constrainToWater(x, y, 26);
+      f.x = p.x; f.y = p.y;
+      f.vx = 0; f.vy = 0;
+    }
+    this.fishes.push(f);
+    this.save.touch();
+    return f;
+  }
+
+  /**
+   * 在点击处加一只龟（点在水里→游动；点在岸上→直接上岸趴着；
+   * 水龟被放到岸上且非主动状态时，状态机会自己把它带回水里）
+   * @param {string} speciesId
+   * @param {number} [x]
+   * @param {number} [y]
+   */
+  addTurtleAt(speciesId, x, y) {
+    if (this.turtles.length >= CONFIG.growth.turtleCap) return null;
+    const sp = TURTLE_SPECIES[speciesId];
+    if (!sp) { console.warn('[pond] 未知龟品种:', speciesId); return null; }
+    const t = new Turtle(this.world, this.turtles.length, sp);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      const cx = clamp(x, 12, this.world.w - 12);
+      t.x = cx;
+      if (this.world.isWater(cx, y)) {
+        const p = this.world.constrainToWater(cx, y, 18);
+        t.y = p.y;
+        t.state = 'swim';
+        t.stateTime = 0;
+      } else {
+        // 岸边：不让它贴到屏幕最上沿
+        t.y = Math.max(16, Math.min(y, this.world.bankLineAt(cx) - 6));
+        t.state = 'bask';
+        t.stateTime = 0;
+      }
+      t.vx = 0; t.vy = 0;
+    }
+    t.onLayEggs = (turtle) => this._turtleLayEggs(turtle);
+    this.turtles.push(t);
+    this.save.touch();
+    return t;
+  }
+
+  /**
+   * 在点击处种一株植物（按品种所属层自动吸附到岸线/水面/泥沼线）
+   * @param {string} speciesId
+   * @param {number} [x]
+   * @param {number} [y]
+   */
+  addPlantAt(speciesId, x, y) {
+    const sp = PLANT_SPECIES[speciesId];
+    if (!sp) { console.warn('[pond] 未知植物品种:', speciesId); return null; }
+    this.plantsEnabled = true;                  // 关着植物就先打开，否则种了看不见
+    const p = this.plants.addPlant(speciesId, x ?? this.world.w / 2, y ?? 0);
+    if (p) this.save.touch();
+    return p;
+  }
+
+  // ── 存档接口（阶段 6-①）───────────────────────────────
+  /** 立即存档 */
+  saveNow() {
+    const ok = this.save.save('manual');
+    return { ok, at: new Date().toLocaleTimeString(), reason: this.save.lastSaveReason, error: this.save.error };
+  }
+
+  /** 存档概要（当前内存世界 / 已落盘存档） */
+  saveInfo() {
+    return {
+      hasSave: this.save.hasSave(),
+      hasTrash: this.save.hasTrash(),
+      resumed: this.resumed,
+      schema: SAVE_SCHEMA,
+      key: SAVE_KEY,
+      lastSaveAt: this.save.lastSaveAt ? new Date(this.save.lastSaveAt).toLocaleString() : null,
+      current: this.save.summarize(this.save.snapshot()),
+    };
+  }
+
+  /** 导出存档为 .json 下载 */
+  exportSave() { return this.save.exportFile(); }
+
+  /**
+   * 导入存档（从文本）—— 写入后需刷新页面生效
+   * @param {string} text
+   */
+  importSave(text) {
+    const res = this.save.importText(text);
+    if (res.ok) res.hint = '已写入存档，刷新页面后生效（F5 / 重新应用壁纸）';
+    return res;
+  }
+
+  /** 重新开始：清档（可恢复），刷新后生效 */
+  newGame(wipeArchive = false) {
+    const ok = this.save.reset(wipeArchive);
+    return { ok, recoverable: ok, hint: '已清档。后悔了？pond.undoReset() 可恢复' };
+  }
+
+  /** 撤销清档 */
+  undoReset() {
+    const ok = this.save.undoReset();
+    return { ok, hint: ok ? '已恢复被清掉的存档，刷新后生效' : '没有可恢复的存档' };
+  }
+
+  /**
+   * 屏幕中央下方弹一条短提示（存档/导出等即时反馈）
+   * @param {string} text
+   * @param {number} [seconds=2.2]
+   */
+  _toast(text, seconds = 2.2) {
+    this._toastText = text;
+    this._toastTimer = seconds;
   }
 
   setQuality(level) {
@@ -303,6 +547,7 @@ class PondApp {
   /** 重建植物群落：pond.setPlants({ lilypad: 12, reed: 30 }) */
   setPlants(pop) {
     this.plants.build(pop);
+    this.save.touch();
     return this.plants.population();
   }
 
@@ -342,6 +587,10 @@ class PondApp {
     if (!this.paused && this.visible) {
       this._update(dt, now / 1000);
     }
+    // 存档节流推进（暂停时不计时，避免暂停期间反复写盘）
+    if (this.visible) this.save.tick(dt);
+    // 提示条倒计时（用真实 dt，暂停时也照样淡出）
+    if (this._toastTimer > 0) this._toastTimer = Math.max(0, this._toastTimer - dt);
     this.panel.tick(dt);
     this._render(now / 1000);
 
@@ -548,11 +797,63 @@ class PondApp {
     // 选中生物的高亮呼吸圈（跟随游动）
     this.panel.drawHighlight(ctx, time);
 
+    // 「选品种」面板开着时，标出这次投放的落点
+    if (this.picker?.open) {
+      const { x, y } = this.picker;
+      const a = 0.55 + Math.sin(time * 4) * 0.25;
+      ctx.save();
+      ctx.strokeStyle = `rgba(255,236,150,${a})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([4, 5]);
+      ctx.strokeStyle = `rgba(255,255,255,${a * 0.7})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(x, y, 19, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     // HUD
     if (this.showHelp) this._drawHelp(ctx);
     if (this.showLegend) this._drawLegend(ctx);
     if (this.showArchive) this._drawArchive(ctx);
     if (this.showStats) this._drawStats(ctx);
+    this._drawToast(ctx);
+  }
+
+  /** 短暂提示条（S 存档 / Shift+S 导出等） */
+  _drawToast(ctx) {
+    if (!this._toastText || this._toastTimer <= 0) return;
+    const life = Math.min(1, this._toastTimer / 0.35);   // 末尾 0.35s 淡出
+    ctx.save();
+    ctx.globalAlpha = life;
+    ctx.font = '14px "Microsoft YaHei", ui-sans-serif, sans-serif';
+    const padX = 18, padY = 11, lh = 20;
+    const lines = this._toastText.split('\n');
+    let maxW = 0;
+    for (const l of lines) maxW = Math.max(maxW, ctx.measureText(l).width);
+    const bw = maxW + padX * 2;
+    const bh = lines.length * lh + padY * 2;
+    const bx = (this.world.w - bw) / 2;
+    const by = this.world.h - bh - 64;
+
+    ctx.fillStyle = 'rgba(10,28,36,0.78)';
+    const r = 12;
+    ctx.beginPath();
+    ctx.moveTo(bx + r, by);
+    ctx.arcTo(bx + bw, by, bx + bw, by + bh, r);
+    ctx.arcTo(bx + bw, by + bh, bx, by + bh, r);
+    ctx.arcTo(bx, by + bh, bx, by, r);
+    ctx.arcTo(bx, by, bx + bw, by, r);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = '#d6f0f8';
+    lines.forEach((l, i) => ctx.fillText(l, bx + padX, by + padY + lh * (i + 0.78)));
+    ctx.restore();
   }
 
   _drawStats(ctx) {
@@ -583,7 +884,8 @@ class PondApp {
       '🐢 乌龟水塘',
       '',
       '左键点鱼/龟 → 查看信息卡（可改名）',
-      '左键点空白  →  投喂饲料',
+      '左键点空白  →  投喂饲料 + 弹出「选品种」',
+      '  面板上点品种 = 放 1 只（可连点）',
       '移动鼠标  →  鱼群避让 / 乌龟好奇',
       'Esc       →  关闭信息卡',
       '右键 / H  →  显示/隐藏帮助',
@@ -591,15 +893,19 @@ class PondApp {
       'F         →  全屏',
       '1~6       →  按品种添加小鱼',
       'T         →  增加乌龟',
+      'A         →  选品种面板（加鱼/龟/草）',
       'L         →  物种列表',
       'P         →  显示/隐藏植物',
       'N         →  时间快进 ×25（看昼夜）',
       'W         →  切换天气（晴/雨/雨后）',
       'O         →  生命档案（逝者纪念册）',
+      'S         →  立即存档',
+      'Shift+S   →  导出存档 JSON 文件',
+      'Shift+R   →  重新开始（清档，可撤销）',
       '',
       '🌿 鱼吃饱繁殖鱼苗，龟上岸产蛋孵化',
       '📖 逝者留下遗骸（螺蛳清理），记入生命档案',
-    ];
+      '💾 关掉壁纸再打开，继续上次的水塘',    ];
     this._panel(ctx, lines, 16, 16);
   }
 
@@ -681,12 +987,22 @@ class PondApp {
 
 // 启动
 window.addEventListener('DOMContentLoaded', () => {
-  window.pondApp = new PondApp();
+  const params = new URLSearchParams(location.search);
+
+  // ?fresh=1 → 忽略存档，开一口新水塘（不影响已有存档，下次打开照常恢复）
+  const fresh = params.get('fresh') === '1';
+
+  window.pondApp = new PondApp(DEFAULT_POPULATION, { resume: !fresh });
 
   // URL 参数 ?t=0.85 → 直接跳到指定时刻（调试/分享用，0=黎明 0.3=白天 0.56=黄昏 0.85=夜晚）
-  const tParam = parseFloat(new URLSearchParams(location.search).get('t'));
+  const tParam = parseFloat(params.get('t'));
   if (!Number.isNaN(tParam) && window.pondApp.daynight) {
     window.pondApp.daynight.setDayT(Math.min(1, Math.max(0, tParam)));
+  }
+  // URL 参数 ?w=rain → 直接切到指定天气（调试用：sunny / rain / afterRain）
+  const wParam = params.get('w');
+  if (wParam && window.pondApp.weather) {
+    window.pondApp.weather.set(wParam);
   }
 
   // 控制台 API（也供将来 Lively 扩展调用）
@@ -696,6 +1012,11 @@ window.addEventListener('DOMContentLoaded', () => {
     addFish: (n = 1, id = null, opts = {}) => window.pondApp.addFish(n, id, opts),
     /** 加龟：pond.addTurtle('redear') 或 pond.addTurtle('redear', {baby:true}) */
     addTurtle: (id = null, opts = {}) => window.pondApp.addTurtle(id, opts),
+    /** 指定位置投放（选品种面板用）：pond.spawnAt('plant','lotus', 800, 400) */
+    spawnAt: (kind, id, x, y) => window.pondApp.spawnAt(kind, id, x, y),
+    /** 选品种面板：pond.picker(true) 打开 / pond.picker(false) 关闭 */
+    picker: (on = true) => (on ? window.pondApp.picker.showAt(
+      window.pondApp.world.w / 2, window.pondApp.world.h / 2) : window.pondApp.picker.close()),
     /** 看当前物种：pond.population() */
     population: () => window.pondApp.population(),
     /** 看有哪些品种：pond.species() */
@@ -750,6 +1071,24 @@ window.addEventListener('DOMContentLoaded', () => {
     }),
     pause: () => { window.pondApp.paused = true; },
     play: () => { window.pondApp.paused = false; },
+
+    // ── 存档（阶段 6-①）───────────────────────────────
+    /** 立即存档：pond.save() */
+    save: () => window.pondApp.saveNow(),
+    /** 存档状态：pond.saveInfo() → 是否有档 / 上次存档时间 / 世界概要 */
+    saveInfo: () => window.pondApp.saveInfo(),
+    /** 导出存档为 JSON 文件（浏览器下载） */
+    exportSave: () => window.pondApp.exportSave(),
+    /** 导入存档文本：pond.importSave(jsonString) → 刷新后生效 */
+    importSave: (text) => window.pondApp.importSave(text),
+    /** 重新开始（清档，可恢复）：pond.newGame() */
+    newGame: (wipeArchive = false) => window.pondApp.newGame(wipeArchive),
+    /** 撤销清档：pond.undoReset() */
+    undoReset: () => window.pondApp.undoReset(),
+    /** 完成「重新开始」后彻底丢弃可恢复的旧档 */
+    dropTrash: () => { window.pondApp.save.dropTrash(); return true; },
+    /** 本次是否读档继续 */
+    resumed: () => window.pondApp.resumed,
   };
   console.log('[🐢 乌龟水塘] 控制台 API 已就绪，试试：pond.species() / pond.addFish(3, "koi")');
 });
@@ -778,6 +1117,7 @@ window.livelyPropertyListener = function (name, val) {
     }
     case 'duckweedCount': {
       app.duckweed = new DuckweedField(app.world, val);
+      app.save.touch();
       break;
     }
     case 'waterTop':
@@ -804,6 +1144,30 @@ window.livelyPropertyListener = function (name, val) {
       break;
     case 'weatherEnabled':
       CONFIG.weather.enabled = !!val;
+      break;
+
+    // ── 存档相关（阶段 6-①）────────────────────────────
+    // Lively 每次加载都会把全部属性以当前值回调一遍。
+    // 关键是"只在值真的变化时"才动手，否则每次打开壁纸都会清档。
+    case 'saveEnabled':
+      app.settings.saveEnabled = !!val;
+      break;
+    case 'resetPond':
+      // 勾选 → 清档并重启；取消勾选 → 撤销清档
+      if (val) {
+        if (app._resetHandled) break;         // 同一次会话只执行一次
+        app._resetHandled = true;
+        const r = app.newGame(false);
+        console.info('[存档] 重新开始：', r);
+        setTimeout(() => location.reload(), 300);
+      } else {
+        app._resetHandled = false;
+        if (app.save.hasTrash()) {
+          app.undoReset();
+          console.info('[存档] 已撤销清档');
+          setTimeout(() => location.reload(), 300);
+        }
+      }
       break;
   }
 };
