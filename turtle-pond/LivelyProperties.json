@@ -79,6 +79,29 @@
     "text": "天气系统（晴/小雨/雨后）",
     "value": true
   },
+  "fxEnabled": {
+    "type": "checkbox",
+    "text": "视觉打磨（阴影/景深/水面光斑）",
+    "value": true
+  },
+  "audioEnabled": {
+    "type": "checkbox",
+    "text": "音效（默认关闭，避免打扰）",
+    "value": false
+  },
+  "masterVolume": {
+    "type": "slider",
+    "text": "音量",
+    "value": 0.35,
+    "min": 0,
+    "max": 1,
+    "step": 0.05
+  },
+  "frogSound": {
+    "type": "checkbox",
+    "text": "夜晚蛙鸣",
+    "value": true
+  },
   "species": {
     "_comment": "品种配置：key=品种 id，value=数量。改这里即可自定义水塘物种组成。",
     "fish": {

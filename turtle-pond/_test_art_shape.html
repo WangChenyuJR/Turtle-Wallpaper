@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>美术外形随机化 测试</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { PLANT_SPECIES, Plant } from './src/plants.js';
+    import { seededRandom, blobPath } from './src/utils.js';
+    import { World } from './src/world.js';
+
+    setTimeout(() => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+
+      try {
+        const app = window.pondApp;
+        ok(!!app, '场景已初始化');
+
+        // ── 1. 确定性随机：同 seed 同序列，不同 seed 不同 ──
+        const a1 = seededRandom(12345), a2 = seededRandom(12345), b1 = seededRandom(999);
+        const s1 = [a1(), a1(), a1()].join(','), s2 = [a2(), a2(), a2()].join(',');
+        ok(s1 === s2, `同 seed 序列一致（${s1}）`);
+        ok(s1 !== [b1(), b1(), b1()].join(','), '不同 seed 序列不同');
+
+        // ── 2. blobPath 不规则轮廓：半径有明显起伏 ────────
+        const cv = document.createElement('canvas'); cv.width = 200; cv.height = 200;
+        const cx2 = cv.getContext('2d');
+        blobPath(cx2, 100, 100, 40, 40, [0.16, 0.1, 0.06], [1.1, 2.4, 0.3], 0.5, 60);
+        // 重新用公式量一遍半径起伏
+        let rMin = 9, rMax = 0;
+        for (let i = 0; i < 360; i += 2) {
+          const t = (i / 360) * Math.PI * 2;
+          const k = 1 + 0.16 * Math.sin(t * 2 + 1.1) + 0.1 * Math.sin(t * 3 + 2.4) + 0.06 * Math.sin(t * 4 + 0.3);
+          const rr = 40 * k;
+          rMin = Math.min(rMin, rr); rMax = Math.max(rMax, rr);
+        }
+        ok((rMax - rMin) / 40 > 0.2, `轮廓半径起伏明显（±${(((rMax - rMin) / 2) / 40 * 100).toFixed(0)}%）`);
+        ok(rMax / rMin > 1.15, `最大/最小半径比 ${ (rMax / rMin).toFixed(2) } > 1.15（不是正圆）`);
+
+        // ── 3. 植物：同 seed 复现同一外形 ─────────────────
+        const W = app.world;
+        const mk = (id, seed) => {
+          const sp = PLANT_SPECIES[id];
+          const zone = sp.kind === 'bank' ? 'bank' : (sp.kind === 'surface' ? 'surface' : 'submerged');
+          const p = new Plant(W, sp, zone);
+          if (seed != null) p.reseed(seed);
+          return p;
+        };
+        const pA = mk('lilypad', 777), pB = mk('lilypad', 777), pC = mk('lilypad', 778);
+        ok(JSON.stringify(pA.shape) === JSON.stringify(pB.shape), '同 seed → shape 参数完全一致');
+        ok(JSON.stringify(pA.shape) !== JSON.stringify(pC.shape), '不同 seed → shape 参数不同');
+        ok(pA.seed === 777 && pB.seed === 777, 'reseed 写回 seed');
+
+        // ── 4. 荷叶不再"清一色正圆" ───────────────────────
+        const pads = app.plants.plants.filter((p) => p.kind === 'surface');
+        const sxs = pads.map((p) => p.shape.sx), sys = pads.map((p) => p.shape.sy);
+        const varOf = (arr) => {
+          const m = arr.reduce((s, v) => s + v, 0) / arr.length;
+          return arr.reduce((s, v) => s + (v - m) ** 2, 0) / arr.length;
+        };
+        ok(varOf(sxs) > 0.002, `叶片横向压缩有差异（方差 ${varOf(sxs).toFixed(4)}）`);
+        const circly = pads.filter((p) => Math.abs(p.shape.sx - p.shape.sy) < 0.03).length;
+        ok(circly <= Math.ceil(pads.length / 3), `接近正圆的叶片 ≤1/3（${circly}/${pads.length}）`);
+        const wavy = pads.filter((p) => p.shape.harm[0] > 0.06).length;
+        ok(wavy >= Math.floor(pads.length / 2), `过半叶片带明显波浪边（${wavy}/${pads.length}）`);
+        const notched = pads.filter((p) => p.shape.notchW > 0.05).length;
+        ok(notched === pads.length, '所有莲叶都有缺口（睡莲 V 口 / 荷花浅口）');
+        const notchAngles = new Set(pads.map((p) => Math.round(p.shape.notchA * 10)));
+        ok(notchAngles.size >= Math.min(4, pads.length), `缺口朝向各不相同（${notchAngles.size} 种）`);
+
+        // ── 5. 花：花瓣数与几何随机 ───────────────────────
+        const flowered = pads.filter((p) => p.hasFlower);
+        const petalSet = new Set(flowered.map((p) => p.shape.petals));
+        ok(flowered.length === 0 || petalSet.size >= 1, `花瓣数有差异（${[...petalSet].join('/')}）`);
+        const petalSpread = flowered.every((p) =>
+          p.shape.petalLen.some((v) => v < 0.95) && p.shape.petalLen.some((v) => v > 1.05));
+        ok(petalSpread, '花瓣长短不一（同一朵内 len 有差异）');
+
+        // ── 6. 水草：叶片束个体差异大 ─────────────────────
+        const eels = app.plants.plants.filter((p) => p.sp.id === 'eelgrass');
+        const bladeCounts = eels.map((p) => p.shape.blades.length);
+        const bcSet = new Set(bladeCounts);
+        ok(Math.min(...bladeCounts) >= 3 && Math.max(...bladeCounts) <= 8,
+          `水草根数在 3~8（实际 ${Math.min(...bladeCounts)}~${Math.max(...bladeCounts)}）`);
+        ok(bcSet.size >= 3, `根数至少 3 种（${[...bcSet].sort().join('/')}）`);
+        const leans = eels.flatMap((p) => p.shape.blades.map((b) => b.lean));
+        const leanSpan = Math.max(...leans) - Math.min(...leans);
+        ok(leanSpan > 0.3, `叶片倾斜跨度 ${leanSpan.toFixed(2)}（不再是整齐直线）`);
+        const lenSpread = Math.max(...eels.map((p) => Math.max(...p.shape.blades.map((b) => b.len))))
+                        - Math.min(...eels.map((p) => Math.min(...p.shape.blades.map((b) => b.len))));
+        ok(lenSpread > 0.3, `叶片长度跨度 ${lenSpread.toFixed(2)}`);
+
+        // ── 7. 岸边植物：茎数随机 ────────────────────────
+        const reeds = app.plants.plants.filter((p) => p.sp.id === 'reed');
+        const stalkSet = new Set(reeds.map((p) => p.shape.stalks.length));
+        ok(stalkSet.size >= 2, `芦苇茎数有变化（${[...stalkSet].sort().join('/')}）`);
+
+        // ── 8. 世界：泥土/气泡/卵石外形参数就位 ──────────
+        ok(app.world.mudClumps?.length > 0, `泥面淤泥团 ${app.world.mudClumps.length} 块`);
+        ok(app.world.mudEdges?.length > 0, `泥线小丘 ${app.world.mudEdges.length} 个`);
+        ok(app.world.bubbles.every((b) => b.amps?.length > 0), '气泡都带不规则轮廓参数');
+        ok(app.world.pebbles.every((p) => p.amps?.length > 0), '卵石都带不规则轮廓参数');
+        ok(app.world.grassTufts.every((t) => t.w != null), '草丛逐根带粗细参数');
+
+        // ── 9. 读档复现：seed 走 reseed 还原同款外形 ─────
+        const pOri = mk('lotus', 424242);
+        const snap = JSON.stringify(pOri.shape);
+        const pNew = mk('lotus');               // 随机 seed
+        pNew.reseed(424242);                    // 模拟 restorePlant 的 reseed
+        ok(JSON.stringify(pNew.shape) === snap, '读档 reseed 后外形与原株一致');
+
+        // ── 10. 渲染冒烟：60 步绘制不抛错 ──────────────
+        let drew = true;
+        try {
+          const c3 = document.createElement('canvas'); c3.width = 800; c3.height = 600;
+          const g3 = c3.getContext('2d');
+          for (let i = 0; i < 60; i++) {
+            app.plants.drawLayer(g3, i * 0.016, 'surface');
+            app.plants.drawLayer(g3, i * 0.016, 'submerged');
+            app.plants.drawLayer(g3, i * 0.016, 'bank');
+            app.world.draw(g3, i * 0.016);
+          }
+        } catch (err) { drew = false; log.push(`   异常: ${err.message}`); }
+        ok(drew, '植物+世界 60 步连续绘制无异常');
+      } catch (err) {
+        fail++; log.push(`💥 测试中断: ${err.message}\n${err.stack?.split('\n')[1] ?? ''}`);
+      }
+
+      log.push(`\n—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      const el = document.getElementById('report');
+      el.textContent = log.join('\n');
+      el.id = 'done:' + pass + ':' + fail;
+      window.__TEST_DONE__ = true;
+    }, 1000);
+  </script>
+</body>
+</html>

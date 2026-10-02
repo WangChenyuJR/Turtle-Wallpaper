@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>阶段5-⑧⑨ 视觉打磨/音效 测试（简化）</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    import { CONFIG } from './src/config.js';
+    import { FXLayer } from './src/fx.js';
+    import { AudioEngine } from './src/audio.js';
+
+    setTimeout(() => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+
+      try {
+        const app = window.pondApp;
+        const W = app.world;
+
+        // ── 1. 视觉打磨层（⑧）──────────────────────────
+        ok(app.fx instanceof FXLayer, 'FXLayer 已挂载');
+        ok(!!CONFIG.fx && CONFIG.fx.enabled === true, 'CONFIG.fx 配置存在且默认开启');
+
+        // 深度换算：水面 0 → 水底 1
+        const midX = W.w / 2;
+        const dTop = app.fx.depthAt(W.bankLineAt(midX) + 1, midX);
+        const dBot = app.fx.depthAt(W.marshLineAt(midX) - 1, midX);
+        ok(dTop < 0.05 && dBot > 0.95, `深度换算正确（水面 ${dTop.toFixed(2)} → 水底 ${dBot.toFixed(2)}）`);
+
+        // 阴影不抛异常且真的画了东西（用 1x1 像素探针不好判定，改为函数可调用 + 关闭后不绘制）
+        let threw = false;
+        try {
+          const c = { x: midX, y: W.bankLineAt(midX) + 60, size: 20 };
+          app.fx.drawShadow(app.ctx, c);
+          app.fx.drawShadow(app.ctx, { x: midX, y: 30, size: 20 });   // 岸上分支
+          app.fx.drawDepthFog(app.ctx, 1);
+          app.fx.drawCaustics(app.ctx, 12.3, 1, false);
+          app.fx.drawCaustics(app.ctx, 12.3, 0.1, false);             // 夜里自动跳过
+          app.fx.drawWaterEdge(app.ctx, 1.2, 1);
+        } catch (e) { threw = true; log.push(e.message); }
+        ok(!threw, '五个渲染方法（阴影/景深雾/焦散/高光）调用无异常');
+
+        // 总开关关闭后各方法应立即返回（性能开关有效）
+        CONFIG.fx.enabled = false;
+        const before = app.ctx.getImageData(midX, W.h / 2, 1, 1).data[3];
+        app.fx.drawDepthFog(app.ctx, 1);
+        const after = app.ctx.getImageData(midX, W.h / 2, 1, 1).data[3];
+        ok(before === after, '总开关关闭后景深雾不再绘制（不改变像素）');
+        CONFIG.fx.enabled = true;
+
+        // ── 2. 音效（⑨）────────────────────────────────
+        ok(app.audio instanceof AudioEngine, 'AudioEngine 已挂载');
+        ok(!!CONFIG.audio && CONFIG.audio.muted === true, '默认静音（不打扰用户）');
+
+        const a = app.audio;
+        const st0 = a.status();
+        ok(st0.enabled === false && st0.muted === true, 'muted=true 时 enabled=false');
+
+        // 静音状态下调用播放不应抛异常（且不应创建噪声源）
+        let audThrew = false;
+        try { a.playFeed(); a.playSplash(); a.playFrog(); a.update(0.016, {}); }
+        catch (e) { audThrew = true; log.push(e.message); }
+        ok(!audThrew, '静音状态下调用播放/推进无异常');
+
+        // 取消静音 + 手动解锁（无头环境无真实音频设备，只验证状态机与增益计算）
+        a.unlock();
+        a.setMuted(false);
+        const st1 = a.status();
+        ok(st1.muted === false, '取消静音后 muted=false');
+        ok(CONFIG.audio.masterVolume > 0 && CONFIG.audio.masterVolume <= 1,
+          `总音量在合理区间（${CONFIG.audio.masterVolume}）`);
+
+        // 音量钳制
+        a.setVolume(3);
+        ok(CONFIG.audio.masterVolume === 1, '音量上钳制到 1');
+        a.setVolume(-1);
+        ok(CONFIG.audio.masterVolume === 0, '音量下钳制到 0');
+        a.setVolume(0.35);
+
+        // 解锁后播放不抛异常
+        let audThrew2 = false;
+        try { a.playFeed(1.1); a.playSplash(); a.playFrog(); }
+        catch (e) { audThrew2 = true; log.push(e.message); }
+        ok(!audThrew2, '解锁后三类音效合成无异常');
+
+        // 雨声/蛙鸣推进：雨天 → rain gain 目标 > 0；夜里 → 蛙鸣计时器推进
+        let updThrew = false;
+        try {
+          a.update(0.1, { rain: true, isNight: true, rainIntensity: 1 });
+          for (let i = 0; i < 200; i++) a.update(0.1, { rain: true, isNight: true, rainIntensity: 0.8 });
+        } catch (e) { updThrew = true; log.push(e.message); }
+        ok(!updThrew, '雨天+夜晚推进 20s 无异常');
+
+        // 恢复默认静音，避免测试跑完还留着声音
+        a.setMuted(true);
+
+        // ── 3. 场景长跑（含 ⑧⑨ 全链路）─────────────────
+        CONFIG.fx.enabled = true;
+        let crashed = false;
+        try { for (let i = 0; i < 600; i++) app._update(0.05, 200 + i * 0.05); }
+        catch (e) { crashed = true; log.push(e.message); }
+        ok(!crashed && app.fishes.every(f => isFinite(f.x) && isFinite(f.y)),
+          '开启全部特效长跑 30s 无异常');
+
+        // ── 4. 键控 API ────────────────────────────────
+        ok(typeof window.pond.fx === 'function' && typeof window.pond.setFx === 'function',
+          '控制台 API pond.fx() / pond.setFx() 已挂载');
+        ok(typeof window.pond.audio === 'function' && typeof window.pond.volume === 'function',
+          '控制台 API pond.audio() / pond.volume() 已挂载');
+        const fxAfter = window.pond.setFx('shadow', false);
+        ok(fxAfter.shadow === false, 'setFx 可单独关闭阴影');
+        window.pond.setFx('shadow', true);
+
+        log.push('');
+        log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      } catch (err) {
+        log.push('❌ 异常: ' + err.message);
+        log.push(err.stack);
+      } finally {
+        CONFIG.fx.enabled = true;
+        CONFIG.fx.shadow = true;
+        CONFIG.audio.muted = true;
+        CONFIG.audio.masterVolume = 0.35;
+      }
+      document.getElementById('report').textContent = log.join('\n');
+      window.__TEST_DONE__ = true;
+    }, 600);
+  </script>
+</body>
+</html>

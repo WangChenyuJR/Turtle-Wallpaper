@@ -113,6 +113,27 @@ export const CONFIG = {
     fryEscapeSpeed: 1.25,      // 幼鱼速度加成（小而灵活）
   },
 
+  // ── 视觉打磨（阶段 5-⑧）──────────────────────────────
+  fx: {
+    enabled: true,
+    shadow: true,       // 生物水下投影（随深度扩散变淡）
+    depthFog: true,     // 水下景深冷色雾（越深越浓）
+    caustics: true,     // 水面焦散光斑（随昼夜/雨天衰减）
+    waterEdge: true,    // 岸线水面高光带
+  },
+
+  // ── 音效（阶段 5-⑨）──────────────────────────────────
+  audio: {
+    enabled: true,
+    masterVolume: 0.35,   // 总音量（默认偏轻，壁纸不打扰）
+    muted: true,          // 默认静音：需用户在 Lively 设置里打开
+    feedSound: true,      // 投喂落水声
+    splashSound: true,    // 乌龟入水溅声
+    rainSound: true,      // 雨声（雨天自动）
+    frogSound: true,      // 蛙鸣（夜晚稀疏）
+    ambientSound: true,   // 水塘环境底噪
+  },
+
   // ── 性能（文档 5.3 性能策略）──────────────────────────
   perf: {
     visibleFps: 60,
@@ -120,13 +141,26 @@ export const CONFIG = {
     pauseWhenHidden: true,
   },
 
-  // ── 配色 ──────────────────────────────────────────────
+  // ── 配色（阶段 5-⑩ 写实化重制）────────────────────────
+  // 思路：水体不再是一根竖直渐变，而是「近岸浅色 → 中景主色 → 深水暗色」
+  // 三段色 + 天空倒影色，让水面有真实的深浅层次。
   colors: {
     sky: '#cfe3ef',
-    waterTop: '#4a8fa8',
-    waterBottom: '#1e4a5f',
+    // 水面：浅岸边 / 中景 / 深水
+    waterShallow: '#6fb4c4',
+    waterMid: '#3a7f99',
+    waterDeep: '#16414f',
+    waterBottom: '#0e2f3c',      // 兼容旧字段（用作最深点）
+    waterTop: '#4a8fa8',         // 兼容旧字段（水面平均色）
+    skyReflect: '#cfeaf4',       // 天空倒影高光
+    // 水下体积色调（用于水底沉积）
+    silt: '#4a4636',
+    // 岸边
     bankSand: '#c9b48a',
+    bankSandDark: '#a8905f',
     bankGrass: '#6f8b4a',
+    bankGrassDark: '#4f6b34',
+    // 水底泥沼
     marsh: '#3a3524',
     marshMud: '#2a2419',
     duckweed: '#7fb04a',
@@ -134,5 +168,28 @@ export const CONFIG = {
     plantBank: '#6f8b4a',
     plantSurface: '#4f8a3f',
     plantSubmerged: '#3f7a4a',
+  },
+
+  // ── 写实化视觉（阶段 5-⑩）────────────────────────────
+  // 控制本次新增的"自然拟真"图层：水色分层、表面流动纹理、
+  // 沙粒噪点、湿泥暗带、水下沉积颗粒、光标尾迹等。
+  // 每一项都可单独关掉做性能对比（也可整体随 fx.enabled 关闭）。
+  natural: {
+    enabled: true,
+    waterLayers: true,     // 水面三段深浅分层 + 天空倒影
+    surfaceFlow: true,     // 水面流动纹理（多频噪声波纹）
+    skyReflect: true,      // 天空倒影带
+    bottomSilt: true,      // 水底沉积颗粒/泥沙浊度
+    bankTexture: true,     // 岸边沙粒与湿泥纹理
+    cursorWake: true,      // 鼠标水面尾迹（真实波动方程）
+    cursorWakeMinDist: 6,  // 光标移动多少像素才补一次扰动
+    // ── 真实波动方程水场（阶段 5-⑪）──────────────────
+    wave: true,            // 总开关：关掉退回旧的多频波纹
+    waveCell: 7,           // 波场网格每格像素（越小越精细越费）
+    waveBlock: 6,          // 渲染块大小（每块读一次梯度着色）
+    waveSurface: true,     // 是否渲染波场的折射明暗
+    // ── 程序化地表纹理（阶段 5-⑪）────────────────────
+    terrainTex: true,      // 岸边/水底是否叠加程序化泥/沙纹理
+    terrainTexAlpha: 0.55, // 纹理叠加强度
   },
 };

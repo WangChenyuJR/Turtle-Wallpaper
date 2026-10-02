@@ -4,7 +4,7 @@
  */
 
 import { CONFIG } from './config.js';
-import { rand, randInt, clamp } from './utils.js';
+import { rand, randInt, clamp, blobShape, blobPath } from './utils.js';
 
 export class Duckweed {
   constructor(world) {
@@ -26,6 +26,11 @@ export class Duckweed {
     this.rot = rand(0, Math.PI * 2);
     this.rotSpeed = rand(-0.15, 0.15);
     this.leafCount = randInt(2, 4);
+    // 每片小叶的不规则外形（不是清一色椭圆）
+    const shp = blobShape(Math.random, 2, 0.14, 0.32);
+    this.leafAmps = shp.amps;
+    this.leafPhases = shp.phases;
+    this.leafAspect = rand(0.55, 0.85);
   }
 
   update(dt, movers) {
@@ -69,15 +74,14 @@ export class Duckweed {
       const lx = Math.cos(a) * this.r * 0.55;
       const ly = Math.sin(a) * this.r * 0.55;
       ctx.fillStyle = i % 2 ? '#6fa03e' : '#7fb04a';
-      ctx.beginPath();
-      ctx.ellipse(lx, ly, this.r * 0.62, this.r * 0.5, a, 0, Math.PI * 2);
+      blobPath(ctx, lx, ly, this.r * 0.62, this.r * 0.62 * this.leafAspect,
+        this.leafAmps, this.leafPhases, a);
       ctx.fill();
     }
-    // 中心小点
+    // 中心小点（也不规则）
     ctx.fillStyle = '#d8ffb0';
     ctx.globalAlpha = 0.5;
-    ctx.beginPath();
-    ctx.arc(0, 0, this.r * 0.15, 0, Math.PI * 2);
+    blobPath(ctx, 0, 0, this.r * 0.15, this.r * 0.12, this.leafAmps, this.leafPhases, this.rot);
     ctx.fill();
     ctx.restore();
   }

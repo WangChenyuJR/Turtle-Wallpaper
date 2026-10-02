@@ -15,7 +15,19 @@
  */
 
 import { CONFIG } from './config.js';
-import { rand, randInt, clamp, dist2 } from './utils.js';
+import {
+  rand, randInt, clamp, dist2,
+  seededRandom, rngRange, rngInt, blobShape, blobPath,
+} from './utils.js';
+
+/** 颜色明暗调整：'#rrggbb' × factor（>1 提亮，<1 压暗）→ 'rgb(r,g,b)' */
+function tint(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = clamp(Math.round(((n >> 16) & 255) * f), 0, 255);
+  const g = clamp(Math.round(((n >> 8) & 255) * f), 0, 255);
+  const b = clamp(Math.round((n & 255) * f), 0, 255);
+  return `rgb(${r},${g},${b})`;
+}
 
 // ══════════════════════════════════════════════════════════
 //  植 物 品 种
@@ -150,6 +162,10 @@ export class Plant {
     this.hueJitter = rand(-6, 6);
     this.scale = rand(0.82, 1.18);
 
+    // 外形随机种子：同一株读档后形状完全一致（save.js 会持久化 seed）
+    this.seed = randInt(1, 0x7ffffffe);
+    this._buildShape();
+
     // 位置（按区域分别放置）
     this._place();
 
@@ -234,54 +250,183 @@ export class Plant {
          + Math.sin(time * 2.3 + this.phase) * amp * 0.3;
   }
 
-  // ── 岸边植物：细长茎 + 顶端（穗/蒲棒）───────────────
+  // ══ 随机外形 ══════════════════════════════════════════
+  /**
+   * 生成这株植物的随机外形参数（全部是归一化比例，绘制时再乘实际尺寸）。
+   * 只依赖 seed 与品种 —— 读档 reseed 后可以完全复现同款形状。
+   * 目的：每株叶形/花瓣/叶片都长得不一样，不再"清一色几何图形"。
+   */
+  _buildShape() {
+    const rng = seededRandom(this.seed);
+    const R = (lo, hi) => rngRange(rng, lo, hi);
+    const RI = (lo, hi) => rngInt(rng, lo, hi);
+    const id = this.sp?.id;
+    const S = {};
+
+    if (this.kind === 'surface') {
+      // 叶片：椭圆化 + 谐波波浪边 + 随机朝向缺口（睡莲 V 口大，荷花浅口）
+      S.sx = R(0.84, 1.18);
+      S.sy = R(0.82, 1.10);
+      S.harm = [R(0.05, 0.13), R(0.03, 0.08), R(0.015, 0.05)];
+      S.hphase = [R(0, Math.PI * 2), R(0, Math.PI * 2), R(0, Math.PI * 2)];
+      S.notchA = R(0, Math.PI * 2);
+      S.notchW = id === 'lotus' ? R(0.08, 0.2) : R(0.26, 0.42);
+      S.veins = RI(7, 12);
+      S.veinA = R(0, Math.PI * 2);
+      // 花：花瓣数/长短/宽窄/朝向逐瓣随机，双层
+      S.flowerRot = R(0, Math.PI * 2);
+      S.flowerOx = R(-0.06, 0.06);
+      S.flowerOy = R(-0.06, 0.06);
+      S.petals = id === 'lotus' ? RI(9, 13) : RI(6, 9);
+      S.petalJit = []; S.petalLen = []; S.petalWid = [];
+      for (let i = 0; i < 16; i++) {
+        S.petalJit.push(R(-0.14, 0.14));
+        S.petalLen.push(R(0.82, 1.14));
+        S.petalWid.push(R(0.26, 0.44));
+      }
+      const core = blobShape(rng, 2, 0.12, 0.3);
+      S.coreAmps = core.amps; S.corePhases = core.phases;
+      S.stamens = RI(6, 10);
+    } else if (this.kind === 'submerged') {
+      // 叶片束：根数/长度/粗细/倾斜/弯曲逐根随机，部分带侧小叶
+      // lean/curve 给足幅度，避免"一排整齐直线"
+      const n = RI(3, 8);
+      S.blades = [];
+      for (let i = 0; i < n; i++) {
+        S.blades.push({
+          off: (i - (n - 1) / 2) * R(2.0, 4.4) + R(-1.6, 1.6),
+          len: R(0.45, 1.1),
+          w: R(0.55, 1.35),
+          lean: R(-0.34, 0.34),
+          curve: R(0.25, 0.95),
+          dark: rng() < 0.45,
+          phase: R(0, Math.PI * 2),
+          leaflet: rng() < 0.55 ? RI(1, 2) : 0,
+        });
+      }
+    } else {
+      // 岸边：茎数/高矮/倾斜随机；蒲棒与狗尾穗走不规则轮廓
+      const n = id === 'banksideGrass' ? RI(3, 5) : RI(2, 3);
+      S.stalks = [];
+      for (let i = 0; i < n; i++) {
+        S.stalks.push({
+          off: (i - (n - 1) / 2) * R(2.2, 3.8) + R(-1.2, 1.2),
+          len: R(0.72, 1.0),
+          lean: R(-0.1, 0.1),
+          dark: rng() < 0.45,
+          w: R(0.75, 1.15),
+        });
+      }
+      const tip = blobShape(rng, 3, 0.12, 0.28);
+      S.tipAmps = tip.amps; S.tipPhases = tip.phases;
+      S.tipRot = R(0, Math.PI * 2);
+      S.tipRx = R(0.85, 1.15);
+      S.tipRy = R(0.85, 1.15);
+    }
+
+    this.shape = S;
+  }
+
+  /** 用已有 seed 重建外形（读档还原同款形状用） */
+  reseed(seed) {
+    this.seed = seed;
+    this._buildShape();
+  }
+
+  /** 叶片半径随角度的起伏（1 = 基准半径）——叶脉长度也跟随它，不会穿出叶外 */
+  _leafK(t) {
+    const S = this.shape;
+    return 1 + S.harm[0] * Math.sin(t * 3 + S.hphase[0])
+           + S.harm[1] * Math.sin(t * 5 + S.hphase[1])
+           + S.harm[2] * Math.sin(t * 7 + S.hphase[2]);
+  }
+
+  /**
+   * 叶形路径：椭圆化 + 波浪边 + 从叶心切开的缺口（真实莲叶的 V 口）。
+   * @param {number} r 基准半径
+   * @param {number} [scale] 整体缩放（描边高光时用 0.96 之类）
+   */
+  _leafPath(ctx, r, scale = 1) {
+    const S = this.shape;
+    const start = S.notchA + S.notchW;
+    const end = S.notchA - S.notchW + Math.PI * 2;
+    const steps = 42;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    for (let i = 0; i <= steps; i++) {
+      const t = start + (end - start) * (i / steps);
+      const k = this._leafK(t) * scale;
+      ctx.lineTo(Math.cos(t) * r * k * S.sx, Math.sin(t) * r * k * S.sy);
+    }
+    ctx.closePath();
+  }
+
+  // ── 岸边植物：随机茎数/高矮/倾斜，蒲棒与狗尾穗走不规则轮廓 ──
   _drawBankPlant(ctx, time) {
     const sp = this.sp;
-    const sway = this._sway(time, sp.sway);
+    const S = this.shape;
     const h = this.height;
     const baseY = this.y;
     const x = this.x;
 
-    // 主体（几根茎）
-    const stalks = this.kind === 'bank' && sp.id === 'banksideGrass' ? 3 : 2;
     ctx.save();
     ctx.lineCap = 'round';
-    for (let i = 0; i < stalks; i++) {
-      const off = (i - (stalks - 1) / 2) * 3.2;
-      const tipX = x + off + sway * (0.6 + i * 0.2);
-      const tipY = baseY - h * (1 - i * 0.06);
-      ctx.strokeStyle = i === 0 ? sp.color : sp.colorDark;
-      ctx.lineWidth = sp.width * (i === 0 ? 1 : 0.8);
+    const tips = [];
+    S.stalks.forEach((s, i) => {
+      const sway = this._sway(time + i * 0.35, sp.sway);
+      const len = h * s.len;
+      const tipX = x + s.off + sway * (0.6 + i * 0.2) + s.lean * len;
+      const tipY = baseY - len;
+      tips.push({ tipX, tipY, sway });
+      ctx.strokeStyle = s.dark ? sp.colorDark : sp.color;
+      ctx.lineWidth = sp.width * s.w;
       ctx.beginPath();
-      ctx.moveTo(x + off, baseY);
-      ctx.quadraticCurveTo(x + off + sway * 0.4, baseY - h * 0.55, tipX, tipY);
+      ctx.moveTo(x + s.off, baseY);
+      ctx.quadraticCurveTo(x + s.off + sway * 0.4, baseY - len * 0.55, tipX, tipY);
       ctx.stroke();
-    }
-    // 香蒲的蒲棒
+    });
+
     if (sp.id === 'cattail') {
+      // 香蒲蒲棒：不规则椭圆团 + 顶端细茎
+      const t0 = tips[0];
       ctx.fillStyle = sp.tipColor;
-      const tipX = x + sway * 0.7;
-      const tipY = baseY - h;
-      ctx.beginPath();
-      ctx.ellipse(tipX, tipY + 9, 3.2, 10, 0, 0, Math.PI * 2);
+      blobPath(ctx, t0.tipX, t0.tipY + 9 * S.tipRy,
+        3.1 * S.tipRx, 9.5 * S.tipRy, S.tipAmps, S.tipPhases, S.tipRot);
       ctx.fill();
+      ctx.strokeStyle = sp.colorDark;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(t0.tipX, t0.tipY);
+      ctx.lineTo(t0.tipX + t0.sway * 0.2, t0.tipY - 7 * S.tipRy);
+      ctx.stroke();
     } else if (sp.id === 'banksideGrass') {
-      // 狗尾草毛茸茸的穗
-      ctx.fillStyle = sp.tipColor;
+      // 狗尾草：每根茎一个毛茸茸的不规则穗 + 向外发散的毛须
       ctx.globalAlpha = 0.85;
-      const tipX = x + sway * 0.6;
-      const tipY = baseY - h;
-      ctx.beginPath();
-      ctx.ellipse(tipX, tipY + 3, 2.4, 7, 0, 0, Math.PI * 2);
-      ctx.fill();
+      for (const t of tips) {
+        ctx.fillStyle = sp.tipColor;
+        blobPath(ctx, t.tipX, t.tipY + 3,
+          2.3 * S.tipRx, 6.5 * S.tipRy, S.tipAmps, S.tipPhases, S.tipRot + t.sway * 0.02);
+        ctx.fill();
+        ctx.strokeStyle = sp.tipColor;
+        ctx.lineWidth = 0.6;
+        for (let k = 0; k < 3; k++) {
+          const a = -Math.PI / 2 + (k - 1) * 0.55 + S.tipRot;
+          ctx.beginPath();
+          ctx.moveTo(t.tipX, t.tipY + 3);
+          ctx.lineTo(t.tipX + Math.cos(a) * 8 * S.tipRx + t.sway * 0.3,
+                     t.tipY + 3 + Math.sin(a) * 8 * S.tipRy);
+          ctx.stroke();
+        }
+      }
       ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
 
-  // ── 水面浮叶：莲叶 + 可选花 ────────────────────────
+  // ── 水面浮叶：莲叶 + 可选花（外形随机，不再是正圆）──
   _drawSurfacePlant(ctx, time) {
     const sp = this.sp;
+    const S = this.shape;
     const x = this.px, y = this.py;
     const r = this.size;
     const bob = Math.sin(time * 1.1 + this.swayPhase) * sp.sway;
@@ -291,66 +436,104 @@ export class Plant {
     ctx.translate(x, y + bob);
     ctx.rotate(rot);
 
-    // 水下茎蔓（淡淡的）
+    // 水下茎蔓（淡淡的，也带点随机弯曲）
     ctx.strokeStyle = sp.colorDark;
     ctx.globalAlpha = 0.35;
     ctx.lineWidth = 1.6;
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.lineTo(0, r * 1.6);
+    ctx.quadraticCurveTo(r * 0.2 * S.sx, r * 0.9, r * 0.1 * S.sx, r * 1.6);
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // 叶片（带缺口的莲叶形）
-    ctx.fillStyle = sp.color;
-    ctx.beginPath();
-    ctx.arc(0, 0, r, -Math.PI / 2 + 0.28, -Math.PI / 2 - 0.28 + Math.PI * 2);
-    ctx.lineTo(0, 0);
-    ctx.closePath();
+    // 叶下阴影（垫出厚度感，形状与叶一致）
+    ctx.save();
+    ctx.translate(r * 0.07, r * 0.14);
+    this._leafPath(ctx, r);
+    ctx.fillStyle = 'rgba(10, 30, 20, 0.26)';
+    ctx.fill();
+    ctx.restore();
+
+    // 叶片本体：椭圆化 + 波浪边 + 随机缺口（不再是完美正圆）
+    const g = ctx.createLinearGradient(-r * S.sx, -r * S.sy, r * S.sx, r * S.sy);
+    g.addColorStop(0, tint(sp.color, 1.12));
+    g.addColorStop(1, tint(sp.color, 0.84));
+    ctx.fillStyle = g;
+    this._leafPath(ctx, r);
     ctx.fill();
 
-    // 叶脉
+    // 叶脉：从叶心放射，长度跟随波浪边缘（不会穿出叶外），避开缺口扇区
     ctx.strokeStyle = sp.colorDark;
-    ctx.globalAlpha = 0.5;
-    ctx.lineWidth = Math.max(0.8, r * 0.04);
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2 + 0.3;
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = Math.max(0.7, r * 0.035);
+    const nv = S.veins;
+    const a0 = S.notchA + S.notchW + 0.15;
+    const a1 = S.notchA - S.notchW - 0.15 + Math.PI * 2;
+    for (let i = 0; i < nv; i++) {
+      const t = a0 + (a1 - a0) * (i / (nv - 1));
+      const k = this._leafK(t) * 0.9;
       ctx.beginPath();
       ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(a) * r * 0.92, Math.sin(a) * r * 0.92);
+      ctx.lineTo(Math.cos(t) * r * k * S.sx, Math.sin(t) * r * k * S.sy);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
 
-    // 边缘高光
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    // 外缘描边（深色收边）+ 内侧高光（随波浪边走）
+    ctx.strokeStyle = sp.colorDark;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 1.2;
+    this._leafPath(ctx, r);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = 'rgba(255,255,255,0.20)';
     ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 0.97, 0, Math.PI * 2);
+    this._leafPath(ctx, r, 0.93);
     ctx.stroke();
 
-    // 花
+    // 花：双层花瓣、长短宽窄逐瓣随机，花心为不规则小团
     if (this.hasFlower) {
-      const fw = sp.id === 'lotus' ? r * 0.5 : r * 0.42;
-      // 花瓣
-      ctx.fillStyle = sp.flower;
-      for (let i = 0; i < 7; i++) {
-        const a = (i / 7) * Math.PI * 2;
+      const base = r * (sp.id === 'lotus' ? 0.52 : 0.44);
+      ctx.save();
+      ctx.translate(S.flowerOx * r, S.flowerOy * r);
+      ctx.rotate(S.flowerRot);
+      for (let ring = 0; ring < 2; ring++) {
+        const count = ring === 0 ? S.petals : Math.max(3, Math.round(S.petals * 0.6));
+        const len0 = base * (ring === 0 ? 1 : 0.62);
+        ctx.fillStyle = ring === 0 ? sp.flower : tint(sp.flower, 0.88);
+        for (let i = 0; i < count; i++) {
+          const a = (i / count) * Math.PI * 2 + ring * 0.5 + S.petalJit[i % S.petalJit.length];
+          const len = len0 * S.petalLen[(i + ring * 3) % S.petalLen.length];
+          const wid = len * S.petalWid[(i * 2 + ring) % S.petalWid.length];
+          ctx.save();
+          ctx.rotate(a);
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.quadraticCurveTo(len * 0.45, -wid, len, -wid * 0.1);
+          ctx.quadraticCurveTo(len * 0.5, wid * 0.9, 0, 0);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+      // 花心：不规则团 + 花蕊点
+      ctx.fillStyle = sp.flowerCore;
+      blobPath(ctx, 0, 0, base * 0.34, base * 0.3, S.coreAmps, S.corePhases, S.flowerRot * 1.7);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(120, 84, 30, 0.8)';
+      for (let i = 0; i < S.stamens; i++) {
+        const a = (i / S.stamens) * Math.PI * 2 + 0.6;
         ctx.beginPath();
-        ctx.ellipse(Math.cos(a) * fw * 0.5, Math.sin(a) * fw * 0.5,
-          fw * 0.5, fw * 0.26, a, 0, Math.PI * 2);
+        ctx.arc(Math.cos(a) * base * 0.2, Math.sin(a) * base * 0.2,
+          Math.max(0.7, base * 0.045), 0, Math.PI * 2);
         ctx.fill();
       }
-      // 花心
-      ctx.fillStyle = sp.flowerCore;
-      ctx.beginPath();
-      ctx.arc(0, 0, fw * 0.32, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.restore();
     }
     ctx.restore();
   }
 
-  // ── 沉水植物：水底向上飘的水草束 ───────────────────
+  // ── 沉水植物：水底向上飘的水草束（叶片根数/形态逐根随机）──
   _drawSubmerged(ctx, time) {
     const sp = this.sp;
     const h = this.height;
@@ -360,20 +543,38 @@ export class Plant {
     ctx.save();
     ctx.lineCap = 'round';
     ctx.globalAlpha = 0.82;
-    const blades = 4;
-    for (let i = 0; i < blades; i++) {
-      const off = (i - (blades - 1) / 2) * 3.4;
-      const sway = this._sway(time + i * 0.4, sp.sway);
-      const bh = h * (0.7 + (i % 2) * 0.3);
-      ctx.strokeStyle = i % 2 === 0 ? sp.color : sp.colorDark;
-      ctx.lineWidth = sp.width * 0.8;
+    for (const b of this.shape.blades) {
+      const sway = this._sway(time + b.phase, sp.sway);
+      const bh = h * b.len;
+      const tipX = x + b.off + sway * (0.6 + b.curve * 0.5) + b.lean * bh;
+      const tipY = baseY - bh;
+      ctx.strokeStyle = b.dark ? sp.colorDark : sp.color;
+      ctx.lineWidth = sp.width * b.w;
       ctx.beginPath();
-      ctx.moveTo(x + off, baseY);
+      ctx.moveTo(x + b.off, baseY);
       ctx.quadraticCurveTo(
-        x + off + sway * 0.5, baseY - bh * 0.5,
-        x + off + sway, baseY - bh
+        x + b.off + sway * 0.5 * b.curve, baseY - bh * 0.5,
+        tipX, tipY
       );
       ctx.stroke();
+
+      // 侧小叶：从主叶 55% / 77% 高度处斜出，左右交替
+      for (let L = 0; L < b.leaflet; L++) {
+        const t0 = 0.55 + L * 0.22;
+        const bx = x + b.off + (tipX - (x + b.off)) * t0;
+        const by = baseY - bh * t0;
+        const side = L % 2 === 0 ? 1 : -1;
+        const ll = bh * (0.15 + b.curve * 0.1);
+        ctx.lineWidth = sp.width * 0.6;
+        ctx.strokeStyle = b.dark ? sp.color : sp.colorDark;
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.quadraticCurveTo(
+          bx + side * ll * 0.5, by - ll * 0.4,
+          bx + side * ll + sway * 0.3, by - ll * 0.85
+        );
+        ctx.stroke();
+      }
     }
     ctx.restore();
   }

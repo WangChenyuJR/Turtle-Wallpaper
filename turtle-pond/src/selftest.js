@@ -1,0 +1,103 @@
+/**
+ * 自测模块 —— 平时只是一个空转的 import，只有 main.js 检测到 ?selftest=1
+ * 时才真正调用 runSelfTest()。（刻意不做成"应用页 + 第二 <script>"，
+ * 规避 headless 下该组合的截图/转储卡死怪癖）
+ *
+ * 覆盖：波动方程引擎物理 + 程序纹理 + 集成链路（addWake/mousemove）
+ * 结果：写入 window.__TEST__，并直接画在 canvas 左上角（headless 截图可读）
+ */
+
+import { CONFIG } from './config.js';
+import { WaterWaveField } from './waterwave.js';
+
+export function runSelfTest(app) {
+  const log = [];
+  let pass = 0, fail = 0;
+  const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? 'PASS ' : 'FAIL ') + m); };
+
+  try {
+    const W = app.world;
+    const wave = W.wave;
+    const midX = W.w / 2;
+    const midY = (W.bankLineAt(midX) + W.marshLineAt(midX)) / 2;
+
+    // ── 1. 波场引擎物理 ─────────────────────────────
+    ok(wave instanceof WaterWaveField, 'world.wave 为波动方程场');
+
+    wave.calm();
+    wave.disturb(midX, midY, 1.5, 3);
+    const e0 = wave.energy();
+    ok(e0 > 0, `扰动产生波能 E=${e0.toFixed(1)}`);
+
+    wave.calm();
+    wave.disturb(midX - 40, midY, 1, 3);
+    wave.disturb(midX + 40, midY, 1, 3);
+    const e2 = wave.energy();
+    ok(e2 > e0 * 0.4, `双源干涉 E=${e2.toFixed(1)}>单波x0.4`);
+
+    const eBefore = wave.energy();
+    for (let i = 0; i < 240; i++) wave.update(1 / 60, { ambient: false });
+    const eAfter = wave.energy();
+    ok(eAfter < eBefore * 0.35, `自然衰减 ${eBefore.toFixed(1)}->${eAfter.toFixed(1)}`);
+
+    const s = wave.sample(midX, midY);
+    ok(Number.isFinite(s.h) && Number.isFinite(s.gx) && Number.isFinite(s.gy),
+      `梯度采样 h=${s.h.toFixed(2)}`);
+
+    // ── 2. 拖拽尾迹链路 ─────────────────────────────
+    wave.calm();
+    for (let i = 0; i < 6; i++) {
+      W.addWake(midX - 120 + i * 40, midY, midX - 80 + i * 40, midY + 6, 700);
+    }
+    ok(wave.energy() > 1, `尾迹写入波场 E=${wave.energy().toFixed(1)}`);
+
+    wave.calm();
+    const baseE = wave.energy();
+    for (let i = 0; i <= 30; i++) {
+      window.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: midX - 150 + i * 10, clientY: midY + Math.sin(i * 0.5) * 12,
+      }));
+    }
+    ok(wave.energy() > Math.max(baseE * 2, 0.5), `mousemove 尾迹 E=${wave.energy().toFixed(2)}`);
+
+    // ── 3. 程序化纹理 ───────────────────────────────
+    W._ensureTextures();
+    ok(!!W.tex && !!W.tex.mud && !!W.tex.sand && !!W.tex.silt && !!W.tex.wetmud, '四张程序纹理生成');
+
+    // ── 4. 渲染无异常 ───────────────────────────────
+    let threw = false;
+    try { W.draw(app.ctx, 45.6); } catch (e) { threw = true; log.push('ERR ' + e.message); }
+    ok(!threw, '完整渲染无异常');
+  } catch (e) {
+    fail++;
+    log.push('CRASH ' + (e.message ?? e));
+  }
+
+  log.unshift(`SELFTEST ${pass}/${pass + fail}`);
+  const result = { pass, fail, log };
+  window.__TEST__ = result;
+  // eslint-disable-next-line no-console
+  console.log(log.join('\n'));
+  return result;
+}
+
+/** 把测试结果直接画上 canvas（headless 截图可读，无 DOM 依赖） */
+export function drawTestBadge(ctx, result) {
+  if (!result) return;
+  ctx.save();
+  ctx.globalAlpha = 0.92;
+  const lh = 22;
+  const w = 620, h = lh * (result.log.length + 1) + 18;
+  ctx.fillStyle = '#0b1520';
+  ctx.fillRect(10, 10, w, h);
+  ctx.strokeStyle = result.fail ? '#e05555' : '#57d977';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(10, 10, w, h);
+  ctx.fillStyle = result.fail ? '#ff8d8d' : '#8df0a8';
+  ctx.font = 'bold 17px Consolas, monospace';
+  ctx.fillText(result.log[0], 24, 34);
+  ctx.font = '14px Consolas, monospace';
+  ctx.fillStyle = '#cfe3ef';
+  result.log.slice(1).forEach((l, i) => ctx.fillText(l, 24, 58 + i * lh));
+  ctx.restore();
+}

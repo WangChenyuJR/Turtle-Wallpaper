@@ -382,6 +382,7 @@ function serializePlant(p) {
     x: r3(p.x), y: r3(p.y),
     phase: r3(p.phase), swayPhase: r3(p.swayPhase),
     hueJitter: r3(p.hueJitter), scale: r3(p.scale),
+    seed: p.seed ?? 0,               // 外形随机种子：读档后每株形状不变
   };
   // 三类植物各自特有的尺寸字段
   if (p.height != null) o.height = r3(p.height);
@@ -634,4 +635,6 @@ function restorePlant(p, d) {
     p.ox = num(d.ox, 0); p.oy = num(d.oy, 0);
     p.pushVx = num(d.pushVx, 0); p.pushVy = num(d.pushVy, 0);
   }
+  // 外形种子：老档没有这个字段就保持构造时的随机外形（向后兼容）
+  if (Number.isFinite(d.seed) && d.seed > 0 && d.seed !== p.seed) p.reseed(d.seed);
 }

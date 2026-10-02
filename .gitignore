@@ -21,6 +21,14 @@ turtle-pond/_dump_out.html
 turtle-pond/_style_probe.html
 turtle-pond/_shot_*.html
 
+# 例外：风格测试页的备选稿截图是正式资产（上面 _*.png 规则的反向豁免）
+!turtle-pond/_cute_*.png
+!turtle-pond/_style_rows_*.png
+!turtle-pond/_style_row_*.png
+
+# ── 参考素材（用户提供的第三方图片，仅作风格分析，不入库）──
+ref-turtle-cartoon/
+
 # ── 编辑器与系统 ──
 .vscode/
 .idea/

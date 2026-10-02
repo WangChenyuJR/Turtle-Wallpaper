@@ -22,9 +22,12 @@ import { DayNight } from './daynight.js';
 import { Weather } from './weather.js';
 import { LifeArchive, KIND_LABELS, CAUSE_LABELS } from './afterlife.js';
 import { Remains, ScavengerField, Snail, Shrimp } from './scavengers.js';
+import { FXLayer } from './fx.js';
+import { AudioEngine } from './audio.js';
 import { CreaturePanel } from './panel.js';
 import { SpeciesPicker } from './species-picker.js';
 import { SaveManager, SAVE_KEY, SCHEMA as SAVE_SCHEMA } from './save.js';
+import { runSelfTest, drawTestBadge } from './selftest.js';
 import {
   DEFAULT_POPULATION, FISH_SPECIES, TURTLE_SPECIES,
   pickFishSpecies, pickTurtleSpecies, listSpecies, HABITAT_LABELS,
@@ -68,6 +71,10 @@ class PondApp {
     this.remains = [];
     this.scavengers = new ScavengerField(this.world);
     this.showArchive = false;
+    // 视觉打磨层（阶段 5-⑧）：阴影 / 景深雾 / 焦散 / 水面高光
+    this.fx = new FXLayer(this.world);
+    // 音效（阶段 5-⑨）：默认静音，首次手势解锁
+    this.audio = new AudioEngine();
     // 生物信息面板（点击鱼/龟查看详情/改名/三视图）
     this.panel = new CreaturePanel(this);
     // 选品种面板（阶段 6-②：添加鱼/龟/草时可选种类）
@@ -75,6 +82,8 @@ class PondApp {
     this.time = 0;
 
     this.cursor = { x: 0, y: 0, active: false };
+    // 光标尾迹状态（阶段 5-⑩）：记录上一位置/时间，按移动速度生成水面尾迹
+    this._cursorTrail = { lx: 0, ly: 0, lt: 0, accum: 0 };
     this.paused = false;
     this.showHelp = true;
     this.showStats = true;
@@ -197,19 +206,20 @@ class PondApp {
       this.cursor.x = e.clientX;
       this.cursor.y = e.clientY;
       this.cursor.active = true;
-      // 光标划过水面产生涟漪
-      if (Math.random() < 0.04) this.world.addRipple(e.clientX, e.clientY, 0.5);
+      this._cursorWake(e.clientX, e.clientY);
     });
     window.addEventListener('mouseleave', () => { this.cursor.active = false; });
 
     // 左键：点中生物 → 信息卡；点空白 → 投喂 + 弹出「选品种」面板（记住投放点）
     window.addEventListener('mousedown', (e) => {
+      this.audio.unlock();      // 首次手势解锁音频（浏览器自动播放策略）
       if (e.button === 0) {
         if (this.panel.handleCanvasClick(e.clientX, e.clientY)) {
           this.picker.close();          // 选生物看资料时，收起选品种面板
           return;
         }
         this.food.feed(e.clientX, e.clientY);
+        this.audio.playFeed();          // 投喂落水声（阶段 5-⑨）
         // 弹出/移动「选品种」面板，记下这次点击的位置作为投放点
         this.picker.showAt(e.clientX, e.clientY);
         this.save.touch();
@@ -271,6 +281,19 @@ class PondApp {
           // 生命档案面板
           this.showArchive = !this.showArchive;
           break;
+        case 'm': {
+          // 静音开关（阶段 5-⑨）；首次按 M 会顺带解锁音频
+          this.audio.unlock();
+          const nowMuted = !CONFIG.audio.muted;
+          this.audio.setMuted(nowMuted);
+          this._toast(nowMuted ? '🔇 已静音' : `🔊 音量 ${Math.round(CONFIG.audio.masterVolume * 100)}%`);
+          break;
+        }
+        case 'g':
+          // 视觉打磨总开关（阶段 5-⑧）：性能对比用
+          CONFIG.fx.enabled = !CONFIG.fx.enabled;
+          this._toast(CONFIG.fx.enabled ? '✨ 视觉打磨：开' : '✨ 视觉打磨：关（省性能）');
+          break;
         case 's':
           // 存档：S = 立即存档；Shift+S = 导出 JSON 文件（阶段 6-①）
           if (e.shiftKey) this._toast(`📦 已导出 ${this.exportSave()}`);
@@ -305,6 +328,35 @@ class PondApp {
     document.addEventListener('visibilitychange', () => {
       this.visible = !document.hidden;
     });
+  }
+
+  /**
+   * 光标水面尾迹（阶段 5-⑪）—— 真实波动方程
+   * 沿光标移动的线段调用 world.addWake → 波场里连续落下扰动，
+   * 水波会真实传播、相互干涉并随距离衰减。
+   * 位移不足 minDist 时先攒着，避免高频采样把波场"打糊"。
+   */
+  _cursorWake(x, y) {
+    const nat = CONFIG.natural || {};
+    if (nat.enabled === false || nat.cursorWake === false) return;
+
+    const tr = this._cursorTrail;
+    const now = performance.now();
+    const dx = x - tr.lx, dy = y - tr.ly;
+    const dist = Math.hypot(dx, dy);
+    const dt = Math.max(1, now - tr.lt) / 1000;
+    const speed = dist / dt;                 // px/s
+
+    if (!tr.lt) { tr.lx = x; tr.ly = y; tr.lt = now; return; }
+
+    const minDist = nat.cursorWakeMinDist ?? 6;
+    if (dist < minDist) { tr.lt = now; return; }
+
+    // 用线段补插值：光标移动再快，尾迹也不会断成一粒粒孤立的波
+    if (this.world.isWater(x, y)) {
+      this.world.addWake(tr.lx, tr.ly, x, y, speed);
+    }
+    tr.lx = x; tr.ly = y; tr.lt = now;
   }
 
   // ── 对外接口（LivelyProperties / 控制台可调）──────────
@@ -622,7 +674,13 @@ class PondApp {
 
     // 乌龟（夜晚不上岸、岸上加速回水）
     for (const t of this.turtles) {
+      const wasInWater = this.world.isWater(t.x, t.y);
       t.update(dt, this.food.items, this.cursor, this.turtles, env);
+      // 从岸上回到水里 → 溅水声（阶段 5-⑨）
+      if (!wasInWater && this.world.isWater(t.x, t.y) && !t.dying) {
+        this.audio.playSplash(0.9);
+        this.world.addRipple(t.x, this.world.bankLineAt(t.x) + 4, 1.1);
+      }
     }
 
     // 食物
@@ -647,8 +705,34 @@ class PondApp {
     // 植物（浮叶被推开 + 摇摆）
     this.plants.update(dt, time, movers);
 
-    // 世界（涟漪）
+    // 世界（涟漪 + 真实波场推进）
     this.world.update(dt);
+
+    // ── 生物游动尾迹（阶段 5-⑪）：鱼/龟在水中游过留下真实扩散的波 ──
+    // 每 0.3s 一批（而不是每帧），控制扰动次数；强度随体型微调
+    this._swimWakeT = (this._swimWakeT ?? 0) + dt;
+    if (this._swimWakeT >= 0.3 && (CONFIG.natural?.wave ?? true)) {
+      this._swimWakeT = 0;
+      for (const f of this.fishes) {
+        if (f.dying) continue;
+        if (this.world.isWater(f.x, f.y)) {
+          this.world.wave.disturb(f.x, f.y, 0.045 + f.size * 0.004, 2);
+        }
+      }
+      for (const t of this.turtles) {
+        if (t.dying || !this.world.isWater(t.x, t.y)) continue;
+        // 只在龟真正移动时起波（趴着晒背不起）
+        const sp = Math.hypot(t.vx ?? 0, t.vy ?? 0);
+        if (sp > 2) this.world.wave.disturb(t.x, t.y, 0.12, 3);
+      }
+    }
+
+    // 音效推进（阶段 5-⑨）：雨声随天气起伏 + 夜晚稀疏蛙鸣
+    this.audio.update(dt, {
+      rain: env.rain,
+      isNight: env.isNight,
+      rainIntensity: this.weather.intensity,
+    });
   }
 
   /** 鱼群繁殖判定：成年 + 饱食 + 同种邻近 + 冷却结束 + 上限内 */
@@ -750,6 +834,9 @@ class PondApp {
     // 场景三区
     this.world.draw(ctx, time);
 
+    // 岸线水面高光带（阶段 5-⑧）
+    this.fx.drawWaterEdge(ctx, time, CONFIG.daynight?.enabled ? this.daynight.light : 1);
+
     // ── 植物分层绘制 ──────────────────────────────────
     if (this.plantsEnabled) {
       // 1) 岸边植物（贴岸线，位于水之前）
@@ -771,12 +858,21 @@ class PondApp {
     for (const r of this.remains) r.draw(ctx, time);
     this.scavengers.draw(ctx, time, 'bottom');
 
+    // ── 生物阴影（阶段 5-⑧）：先铺影，再画本体 ────────
+    for (const t of this.turtles) this.fx.drawShadow(ctx, t);
+    for (const f of this.fishes) this.fx.drawShadow(ctx, f);
+
     // 生物
     for (const t of this.turtles) t.draw(ctx);
     for (const f of this.fishes) f.draw(ctx);
 
     // 小虾（水中层，阶段 5-⑦）
     this.scavengers.draw(ctx, time, 'top');
+
+    // ── 水下景深雾 + 水面焦散（阶段 5-⑧）─────────────
+    const lightNow = CONFIG.daynight?.enabled ? this.daynight.light : 1;
+    this.fx.drawDepthFog(ctx, lightNow);
+    this.fx.drawCaustics(ctx, time, lightNow, CONFIG.weather?.enabled && this.weather.state === 'rain');
 
     // 3) 水面浮叶（睡莲/荷花）—— 画在生物之上，形成遮罩层次
     if (this.plantsEnabled) {
@@ -822,6 +918,9 @@ class PondApp {
     if (this.showArchive) this._drawArchive(ctx);
     if (this.showStats) this._drawStats(ctx);
     this._drawToast(ctx);
+
+    // 自测徽章（?selftest=1 时把断言结果直接画上 canvas，headless 截图可读）
+    if (this._selftestResult) drawTestBadge(ctx, this._selftestResult);
   }
 
   /** 短暂提示条（S 存档 / Shift+S 导出等） */
@@ -899,13 +998,17 @@ class PondApp {
       'N         →  时间快进 ×25（看昼夜）',
       'W         →  切换天气（晴/雨/雨后）',
       'O         →  生命档案（逝者纪念册）',
+      'M         →  静音 / 开声音（首次会解锁音频）',
+      'G         →  视觉打磨开关（阴影/景深/焦散）',
       'S         →  立即存档',
       'Shift+S   →  导出存档 JSON 文件',
       'Shift+R   →  重新开始（清档，可撤销）',
       '',
       '🌿 鱼吃饱繁殖鱼苗，龟上岸产蛋孵化',
       '📖 逝者留下遗骸（螺蛳清理），记入生命档案',
-      '💾 关掉壁纸再打开，继续上次的水塘',    ];
+      '💾 关掉壁纸再打开，继续上次的水塘',
+      '🔊 音效默认关闭，按 M 或到壁纸设置里开启',
+    ];
     this._panel(ctx, lines, 16, 16);
   }
 
@@ -994,6 +1097,33 @@ window.addEventListener('DOMContentLoaded', () => {
 
   window.pondApp = new PondApp(DEFAULT_POPULATION, { resume: !fresh });
 
+  // URL 参数 ?selftest=1 → 运行内置自测（断言 + 结果画上 canvas + 自动扫鼠标尾迹）
+  // 单脚本内完成（无第二 <script>），规避 headless 下多脚本页截图卡死的怪癖
+  if (params.get('selftest') === '1') {
+    const app = window.pondApp;
+    app.showHelp = false;
+    // 同步执行：headless --timeout 截图可能在 load 后立刻触发，等不到 setTimeout
+    try {
+      app._selftestResult = runSelfTest(app);
+    } catch (e) {
+      app._selftestResult = { pass: 0, fail: 1, log: ['CRASH ' + (e.message ?? e)] };
+    }
+    // 之后每 2s 自动划一次鼠标，制造可见尾迹（供截图验收）
+    let sweeps = 0;
+    const timer = setInterval(() => {
+      if (++sweeps > 3) { clearInterval(timer); return; }
+      const y0 = app.world.bankLineAt(app.world.w / 2) + 80;
+      for (let i = 0; i <= 40; i++) {
+        setTimeout(() => {
+          window.dispatchEvent(new MouseEvent('mousemove', {
+            clientX: app.world.w * 0.12 + (app.world.w * 0.76) * (i / 40),
+            clientY: y0 + Math.sin(i * 0.45) * 34,
+          }));
+        }, i * 16);
+      }
+    }, 2000);
+  }
+
   // URL 参数 ?t=0.85 → 直接跳到指定时刻（调试/分享用，0=黎明 0.3=白天 0.56=黄昏 0.85=夜晚）
   const tParam = parseFloat(params.get('t'));
   if (!Number.isNaN(tParam) && window.pondApp.daynight) {
@@ -1071,6 +1201,26 @@ window.addEventListener('DOMContentLoaded', () => {
     }),
     pause: () => { window.pondApp.paused = true; },
     play: () => { window.pondApp.paused = false; },
+    /** 视觉打磨（阶段 5-⑧）：pond.fx() 看开关；pond.setFx('shadow', false) 单独关 */
+    fx: () => ({ ...CONFIG.fx }),
+    setFx: (key, on) => {
+      if (key === 'enabled') CONFIG.fx.enabled = !!on;
+      else if (key in CONFIG.fx) CONFIG.fx[key] = !!on;
+      return { ...CONFIG.fx };
+    },
+    /** 音效（阶段 5-⑨）：pond.audio() 看状态；pond.mute(false) 开声；pond.volume(0.5) */
+    audio: () => window.pondApp.audio.status(),
+    mute: (m = true) => { window.pondApp.audio.unlock(); window.pondApp.audio.setMuted(m); return window.pondApp.audio.status(); },
+    volume: (v) => { window.pondApp.audio.unlock(); window.pondApp.audio.setVolume(v); return window.pondApp.audio.status(); },
+    /** 试听音效：pond.sfx('feed'|'splash'|'frog') */
+    sfx: (name) => {
+      const a = window.pondApp.audio;
+      a.unlock();
+      if (name === 'splash') a.playSplash();
+      else if (name === 'frog') a.playFrog();
+      else a.playFeed();
+      return a.status();
+    },
 
     // ── 存档（阶段 6-①）───────────────────────────────
     /** 立即存档：pond.save() */
@@ -1144,6 +1294,23 @@ window.livelyPropertyListener = function (name, val) {
       break;
     case 'weatherEnabled':
       CONFIG.weather.enabled = !!val;
+      break;
+    // ── 视觉打磨 / 音效（阶段 5-⑧⑨）────────────────────
+    case 'fxEnabled':
+      CONFIG.fx.enabled = !!val;
+      break;
+    case 'audioEnabled': {
+      // 打开声音：需要用户手势解锁，Lively 面板操作算手势
+      if (val) app.audio.unlock();
+      app.audio.setMuted(!val);
+      break;
+    }
+    case 'masterVolume':
+      CONFIG.audio.masterVolume = val;
+      app.audio.setVolume(val);
+      break;
+    case 'frogSound':
+      CONFIG.audio.frogSound = !!val;
       break;
 
     // ── 存档相关（阶段 6-①）────────────────────────────

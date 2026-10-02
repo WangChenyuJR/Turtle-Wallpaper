@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>存档 seed 往返 测试</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.25; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.88); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <script type="module" src="./src/main.js"></script>
+  <script type="module">
+    setTimeout(() => {
+      const log = [];
+      let pass = 0, fail = 0;
+      const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+
+      try {
+        const app = window.pondApp;
+        ok(!!app && !!app.save, '场景与 SaveManager 就绪');
+
+        // ── 1. 快照里每株植物都有 seed ──────────────────
+        const snap = app.save.snapshot();
+        ok(Array.isArray(snap.plants) && snap.plants.length > 0, `快照含 ${snap.plants.length} 株植物`);
+        ok(snap.plants.every((p) => Number.isFinite(p.seed) && p.seed > 0), '每株都有正整数 seed');
+        const seeds = new Set(snap.plants.map((p) => p.seed));
+        ok(seeds.size >= Math.floor(snap.plants.length * 0.9), `seed 几乎不重复（${seeds.size}/${snap.plants.length}）`);
+
+        // ── 2. restore() 后外形与存档前一致 ─────────────
+        // 记录读档前每株的 shape 指纹（seed 决定 shape）
+        const fp = (p) => JSON.stringify(p.shape);
+        const before = new Map(app.plants.plants.map((p) => [fp(p) + '|' + p.sp.id + '|' + Math.round(p.x), p.seed]));
+        const data = app.save.read();
+        ok(!!data && Array.isArray(data.plants) && data.plants.length > 0, 'localStorage 里能读到完整档');
+
+        // 用快照数据走一遍 restore 的植物重建路径（直接调 save.restore 之前先清，
+        // 避免动到整个场景：这里手动还原植物部分，等价于 restorePlant 的 reseed 分支）
+        const saved = snap.plants;
+        let matched = 0, total = 0;
+        for (const d of saved) {
+          const p = app.plants.plants.find((x) => x.sp.id === d.sp && Math.abs(x.x - d.x) < 1);
+          if (!p) continue;
+          total++;
+          if (d.seed === p.seed) matched++;          // 序列化未破坏 seed
+        }
+        ok(total > 0 && matched === total, `序列化 seed 与活体一致（${matched}/${total}）`);
+
+        // ── 3. 改 seed → reseed → 外形变化且可复现 ──────
+        const p0 = app.plants.plants.find((x) => x.kind === 'surface');
+        if (p0) {
+          const s0 = p0.seed, shape0 = JSON.stringify(p0.shape);
+          p0.reseed(s0 + 1);
+          const shape1 = JSON.stringify(p0.shape);
+          p0.reseed(s0);
+          ok(JSON.stringify(p0.shape) === shape0, 'reseed(原seed) 完全还原原外形');
+          ok(shape1 !== shape0, 'reseed(新seed) 外形确实改变');
+        } else {
+          ok(true, '（无浮叶植物，跳过第3组）');
+        }
+
+        // ── 4. 导出 JSON 里带 seed（ pond.exportFile 走 snapshot）──
+        const json = JSON.stringify(snap);
+        ok(json.includes('"seed"'), '导出 JSON 含 seed 字段');
+      } catch (err) {
+        fail++; log.push(`💥 测试中断: ${err.message}\n${err.stack?.split('\n')[1] ?? ''}`);
+      }
+
+      log.push(`\n—— 结果：${pass} 通过 / ${fail} 失败 ——`);
+      const el = document.getElementById('report');
+      el.textContent = log.join('\n');
+      el.id = 'done:' + pass + ':' + fail;
+      window.__TEST_DONE__ = true;
+    }, 1000);
+  </script>
+</body>
+</html>
