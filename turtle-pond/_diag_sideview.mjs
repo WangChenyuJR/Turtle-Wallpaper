@@ -46,10 +46,16 @@ for (const [W, H] of SIZES) {
 
   ok(bad.length === 0, `${tag} 基本几何`, bad.join(' '));
 
-  // 4) 左右两侧必须是岸（高于水线），池中必须是水
-  const leftTop = w.groundYAt(4), rightTop = w.groundYAt(W - 4);
-  ok(leftTop < w.surfaceAt(4) && rightTop < w.surfaceAt(W - 4),
-    `${tag} 左右两侧是岸（左地表 ${leftTop.toFixed(0)} / 右 ${rightTop.toFixed(0)} < 水线 ${w.surfaceAt(4).toFixed(0)}）`);
+  // 4) 左侧必须是岸（高于水线），池中必须是水
+  //    阶段 8-⑦ 起**默认取消右岸**（用户："缓坡多了水的部分就变少了，尽量让水体占更多"），
+  //    所以右侧改成断言"水面一路铺到右缘"。想恢复对称岸：CONFIG.layout.rightBank.enabled = true。
+  const leftTop = w.groundYAt(4);
+  ok(leftTop < w.surfaceAt(4),
+    `${tag} 左侧是岸（左地表 ${leftTop.toFixed(0)} < 水线 ${w.surfaceAt(4).toFixed(0)}）`);
+  const rbOn = CONFIG.layout?.rightBank?.enabled === true;
+  const rx = W - 4;
+  ok(rbOn ? w.groundYAt(rx) < w.surfaceAt(rx) : w.isWaterColumn(rx),
+    `${tag} 右侧${rbOn ? '是岸' : '无岸（水面铺到右缘）'}（右地表 ${w.groundYAt(rx).toFixed(0)} / 水线 ${w.surfaceAt(rx).toFixed(0)}）`);
 
   const midX = W / 2;
   const midWater = w.isWater(midX + w.platform.halfW + 30, (w.surfaceAt(midX) + w.groundYAt(midX + w.platform.halfW + 30)) / 2);
@@ -137,10 +143,17 @@ for (const [W, H] of SIZES) {
     const shoal = w.groundYAt(Math.min(W - 1, edge + 14)) - w.surfaceAt(edge);
     ok(shoal >= -4 && shoal <= (w.bedY - w.waterY) * 0.3,
       `${tag} 入水 14px 才下沉 ${shoal.toFixed(0)}px（近岸是缓浅滩）`);
+
+    // 水体占比（阶段 8-⑦ 用户："尽量让水体占更多"）—— 取消右岸后应明显变大
+    const minWater = CONFIG.layout?.rightBank?.enabled === true ? 0.45 : 0.65;
+    ok(frac >= minWater,
+      `${tag} 水体占 ${(frac * 100).toFixed(0)}%（≥${(minWater * 100).toFixed(0)}%，画面尽量给水）`);
   }
 
   // 11) landZones / waterSpans 结构
-  ok(w.landZones.length >= 2, `${tag} 至少两块陆地（左右岸，实际 ${w.landZones.length}）`);
+  //    现在陆地 = 左岸 [+ 晒台]（右岸默认关闭），所以 ≥1 而不是"左右两块"。
+  ok(w.landZones.length >= 1, `${tag} 至少一块陆地（实际 ${w.landZones.length}）`);
+  ok(w.landZones.some((z) => z.kind === 'bank'), `${tag} 至少有一块"岸"型的陆块（龟有地方爬上去）`);
   ok(w.waterSpans.length >= 1, `${tag} 水域 ${w.waterSpans.length} 段`);
   if (w.platform.on) ok(w.waterSpans.length >= 2, `${tag} 晒台把水域切成两段（实际 ${w.waterSpans.length}）`);
 
@@ -155,12 +168,12 @@ for (const [W, H] of SIZES) {
   ok(over === 0, `${tag} 岸顶草皮层不会盖到水面`, over ? `${over} 列越界` : '');
 }
 
-console.log('\n=== B. 关掉晒台（应只剩一段水，左右仍是岸）===');
+console.log('\n=== B. 关掉晒台（应只剩一段水，只剩左岸一块陆）===');
 CONFIG.layout.platform.enabled = false;
 {
   const w = new World(1280, 720);
   ok(w.waterSpans.length === 1, `关晒台后水域连成一段（实际 ${w.waterSpans.length}）`);
-  ok(w.landZones.length >= 2, `仍有两块岸（实际 ${w.landZones.length}）`);
+  ok(w.landZones.length === 1, `只剩左岸一块陆（实际 ${w.landZones.length}）`);
   const cx = 640;
   ok(w.isWater(cx, (w.surfaceAt(cx) + w.groundYAt(cx)) / 2), '池中央是水');
   let leaked = 0;

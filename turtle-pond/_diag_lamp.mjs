@@ -6,7 +6,8 @@
  *   A. 系统时钟 → dayT / 时段 / 光强 / 钟点文本 的换算对不对
  *   B. 光强曲线连续（不跳变）—— 换时间源时画面不会"闪"
  *   C. 时间源切换 / setDayT 临时脱档 / 5 分钟后自动回真实时间
- *   D. 小灯的开关、点击命中判定、渐亮渐灭、昼夜衰减
+ *   D. 吊灯的几何（不落地 / 全在天空里 / 一排等距 / 与地形解耦）、开关、
+ *      点击命中判定、渐亮渐灭、昼夜衰减
  *   E. 灯真的画了东西；且**柔光是纯高斯**：
  *      每个径向渐变的 alpha 单调递减、边缘精确归零、色标 ≥20 档
  *      （这正是"高斯模糊"观感的三个必要条件，硬边/色环会被这里抓住）
@@ -189,18 +190,46 @@ console.log('\n=== C. 时间源切换 / 手动定时 / 自动回到系统时间 
   restoreClock();
 }
 
-console.log('\n=== D. 小灯：开关 / 命中 / 渐亮渐灭 / 昼夜衰减 ===');
+console.log('\n=== D. 吊灯：几何 / 开关 / 命中 / 渐亮渐灭 / 昼夜衰减 ===');
 {
   const lamp = new PondLamp(world);
   const g0 = lamp.geom();
-  console.log(`  ${lamp.count} 盏灯：` + lamp.list().map((l) => `x${l.x}(h${l.h})`).join(' / '));
-  console.log(`  第 1 盏 baseY=${g0.base.toFixed(0)} 灯罩 y ${g0.shadeTopY.toFixed(0)}~${g0.shadeBotY.toFixed(0)}`);
+  console.log(`  ${lamp.count} 盏吊灯：` + lamp.list().map((l) => `x${l.x}(h${l.h})`).join(' / '));
+  console.log(`  第 1 盏 吊绳 ${g0.cordTopY.toFixed(0)} → 灯泡 y=${g0.bulbY.toFixed(0)}，灯罩 ${g0.shadeTopY.toFixed(0)}~${g0.shadeBotY.toFixed(0)}，光池 y=${g0.poolY.toFixed(0)}`);
+
+  // ── 阶段 8-⑦ 吊灯的几何约束：不落地、整盏留在天空里、横坐标与地形无关 ──
+  ok(g0.cordTopY < 0, `吊绳起点在画面外（y=${g0.cordTopY.toFixed(0)} < 0）—— 看起来是"从上方垂下来"`);
+  ok(g0.shadeBotY < world.bankTopY,
+    `整盏灯都在天空里（灯罩下沿 ${g0.shadeBotY.toFixed(0)} < 岸顶 ${world.bankTopY.toFixed(0)}）—— 不会插进地里`);
+  let outside = 0, offGrid = 0;
+  for (const f of lamp.fixtures) {
+    const g = f.geom();
+    if (g.shadeBotY >= world.bankTopY || g.cordTopY >= 0) outside++;
+    // 横坐标 = 画面宽 × xRatio（**不做 landX 吸附**）：地形怎么改灯位都不动
+    if (Math.abs(f.x - world.w * f.xRatio) > 1e-6) offGrid++;
+  }
+  ok(outside === 0, `${lamp.count} 盏全部"吊在天空里"`);
+  ok(offGrid === 0, `灯位只由画面宽度决定（不等同于旧的 landX 吸附）`);
+  const xs = lamp.fixtures.map((f) => f.x).sort((a, b) => a - b);
+  const gaps = xs.slice(1).map((v, i) => v - xs[i]);
+  ok(gaps.length === 0 || Math.max(...gaps) - Math.min(...gaps) < 1e-6,
+    `一排等距排开（间距 ${gaps.map((v) => v.toFixed(0)).join('/') || '单盏'}）`);
+  // 地形大改（取消右岸）后灯位与竖直位置都不该崩
+  const rbKeep = CONFIG.layout.rightBank.enabled;
+  CONFIG.layout.rightBank.enabled = true;
+  const w2 = new World(1280, 720);
+  const l2 = new PondLamp(w2);
+  let bad2 = 0;
+  for (const f of l2.fixtures) { const g = f.geom(); if (g.shadeBotY >= w2.bankTopY) bad2++; }
+  ok(bad2 === 0, '恢复对称右岸后吊灯仍全在天空里（几何跟地形解耦）');
+  CONFIG.layout.rightBank.enabled = rbKeep;
 
   ok(lamp.on === false, '默认不亮（手动灯，等用户开）');
-  ok(lamp.hitTest(g0.x, g0.bulbY), '点灯罩中心 → 命中');
-  ok(lamp.hitTest(g0.x + g0.poleW, g0.base - g0.h * 0.3), '点灯柱 → 命中');
-  ok(!lamp.hitTest(g0.x + g0.h * 2, g0.bulbY), '点右边远处 → 不命中（会正常投喂）');
-  ok(!lamp.hitTest(g0.x, g0.base + g0.h), '点灯下方地面 → 不命中');
+  ok(lamp.hitTest(g0.sx, g0.bulbY), '点灯罩中心 → 命中');
+  ok(lamp.hitTest(g0.sx, g0.shadeBotY), '点灯罩下沿 → 命中（可点区域够大）');
+  ok(!lamp.hitTest(g0.sx + g0.h * 2, g0.bulbY), '点右边远处 → 不命中（会正常投喂）');
+  ok(!lamp.hitTest(g0.sx, world.bankTopY + 30), '点灯下方的天空/水面 → 不命中');
+  ok(!lamp.hitTest(g0.sx, g0.cordTopY + 20), '点吊绳上半段 → 不命中（细绳不抢点击）');
 
   const before = lamp.toggle();
   ok(before === true, 'toggle() 开灯');
@@ -237,9 +266,11 @@ console.log('\n=== E. 小灯渲染：高斯柔光 / 关灯不画 / 白天更弱 
   lamp.set(false);
   lamp.glow = 0;
   lamp.drawBody(c1.ctx, 1);
-  ok(c1.calls.fill > 10 && c1.calls.grad >= 3, `${lamp.count} 盏灯体都画出来了：fill=${c1.calls.fill} 渐变=${c1.calls.grad}`);
-  ok(c1.calls.stroke >= 3, '灯罩有金属描边');
-  ok(c1.calls.ellipse >= 4, '底座/投影用了椭圆');
+  ok(c1.calls.fill >= lamp.count * 2 && c1.calls.grad >= lamp.count,
+    `${lamp.count} 盏灯体都画出来了：fill=${c1.calls.fill} 渐变=${c1.calls.grad}`);
+  ok(c1.calls.stroke >= lamp.count, '灯罩有金属描边 + 吊环');
+  ok(c1.calls.ellipse === 0 && c1.calls.fillRect >= lamp.count,
+    '吊灯不落地：没有底座/地面投影（椭圆 0 个），只有竖直的吊绳矩形');
 
   const c2 = makeCtx();
   lamp.drawGlow(c2.ctx, 1, 12.3);
@@ -386,7 +417,7 @@ console.log('\n=== G. 多盏灯：排布 / 归一化 / 单盏开关 / 点哪盏�
   ok(g.litCount === 3, '全灭时 toggle → 一起亮');
   for (let i = 0; i < 3; i++) {
     const gi = g.fixtures[i].geom();
-    ok(g.hitIndex(gi.x, gi.bulbY) === i, `点第 ${i + 1} 盏的灯罩 → 命中第 ${i + 1} 盏`);
+    ok(g.hitIndex(gi.sx, gi.bulbY) === i, `点第 ${i + 1} 盏的灯罩 → 命中第 ${i + 1} 盏`);
   }
   ok(g.hitIndex(-50, 10) === -1 && !g.hitTest(-50, 10), '点画面外 → 不命中（这次点击会正常投喂）');
   ok(g.hitIndex(g.fixtures[1].x + g.fixtures[1].h * 3, g.fixtures[1].geom().bulbY) === -1, '点两盏之间 → 不误伤');

@@ -50,15 +50,28 @@ for (const [W, H] of [[1920, 1080], [1280, 720], [800, 500]]) {
 }
 
 // ── D. shorePointNear 一定落在陆地上 ──
+// 阶段 8-⑦ 取消右岸后，水域一直铺到画面右缘：那里的"岸缘"外侧是屏幕边界而非陆地。
+// 所以只在**真的有水**的列上问"最近的岸"（那是龟会问它的场合），并断言返回的是真陆列。
 console.log('\n=== D. shorePointNear 落点可达陆地 ===');
 for (const [W, H] of [[1920, 1080], [1280, 720], [800, 500]]) {
   const world = new World(W, H);
-  let bad = 0;
+  let bad = 0, tested = 0;
   for (let x = 10; x < W - 10; x += 17) {
+    if (!world.isWaterColumn(x)) continue;
+    tested++;
     const sp = world.shorePointNear(x);
     if (!world.isLandColumn(sp.x)) bad++;
   }
-  check(`${W}x${H} shorePointNear 全部落在陆列`, bad === 0, `不达标 ${bad}`);
+  check(`${W}x${H} shorePointNear 全部落在陆列（${tested} 个水列）`, bad === 0, `不达标 ${bad}`);
+}
+// D2. 取消右岸后水体应该明显占更多（用户："尽量让水体占更多"）
+console.log('\n=== D2. 取消右岸 → 水体占比 ===');
+{
+  const world = new World(1920, 1080);
+  let wc = 0, t = 0;
+  for (let x = 0; x <= 1920; x += 4) { t++; if (world.isWaterColumn(x)) wc++; }
+  const frac = wc / t;
+  check('水体占比 ≥ 65%', frac >= 0.65, `${(frac * 100).toFixed(1)}%`);
 }
 
 console.log(`\n=== 合计：通过 ${pass} / 失败 ${fail} ===`);

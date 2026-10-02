@@ -705,11 +705,11 @@ export class PondApp {
     };
   }
 
-  // ── 岸边小灯（阶段 6-⑥ 手动开关 / 6-⑦ 多盏高斯柔光）──
-  /** 灯组的说法：1 盏叫"小灯"，多盏叫"几盏灯" */
+  // ── 悬空吊灯（阶段 6-⑥ 手动开关 / 6-⑦ 多盏高斯柔光 / 8-⑦ 改吊灯）──
+  /** 灯组的说法：1 盏叫"吊灯"，多盏叫"几盏吊灯" */
   _lampLabel() {
     const n = this.lamp?.count ?? 1;
-    return n > 1 ? `${n} 盏小灯` : '岸边小灯';
+    return n > 1 ? `${n} 盏吊灯` : '悬空吊灯';
   }
 
   /**
@@ -1462,7 +1462,7 @@ window.addEventListener('DOMContentLoaded', () => {
     setTime: (t) => window.pondApp.daynight.setDayT(t),
     /** 切换时间来源：pond.setTimeSource('system' | 'cycle') */
     setTimeSource: (s) => window.pondApp.daynight.setSource(s),
-    /** 岸边小灯：pond.lamp() → { on, lit, count, glow, lamps[] }；
+    /** 悬空吊灯：pond.lamp() → { on, lit, count, glow, lamps[] }；
      *  pond.toggleLamp(true/false) 一起开关；pond.toggleLampAt(1) 单独开关第 2 盏 */
     lamp: () => (window.pondApp.lamp ? {
       on: window.pondApp.lamp.isOn,
@@ -1470,9 +1470,10 @@ window.addEventListener('DOMContentLoaded', () => {
       count: window.pondApp.lamp.count,
       glow: +(window.pondApp.lamp.glow ?? 0).toFixed(2),
       x: Math.round(window.pondApp.lamp.x ?? 0),
-      y: Math.round(window.pondApp.lamp.baseY ?? 0),
+      y: Math.round(window.pondApp.lamp.bulbY ?? 0),   // 灯泡中心（吊灯没有"落地基准"了）
+      pool: Math.round(window.pondApp.lamp.poolY ?? 0), // 光池落点 = 水面线
       lamps: window.pondApp.lamp.list(),
-    } : { on: false, lit: 0, count: 0, glow: 0, x: 0, y: 0, lamps: [] }),
+    } : { on: false, lit: 0, count: 0, glow: 0, x: 0, y: 0, pool: 0, lamps: [] }),
     toggleLamp: (on) => window.pondApp.toggleLamp(on),
     toggleLampAt: (i) => window.pondApp.toggleLampAt(i),
     /** 重建种群：pond.setPopulation({fish:{koi:5}, turtle:{redear:2}}) */

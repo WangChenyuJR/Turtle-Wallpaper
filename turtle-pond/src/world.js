@@ -190,9 +190,13 @@ export class World {
     const bump = CONFIG.layout?.hump ?? 4;
     const n = this._noiseAt(x);
     let y;
+    // 阶段 8-⑦：**右岸默认取消**（用户："缓坡多了水的部分就变少了，尽量让水体占更多"）——
+    // 只在左侧保留一条供龟上岸的缓坡，水面一路铺到画面右边缘。
+    // 想恢复对称右岸：CONFIG.layout.rightBank.enabled = true。
+    const rbOn = CONFIG.layout?.rightBank?.enabled === true;
     if (x <= this.bankSpan) {
       y = this._bankProfileY(x / this.bankSpan) + n * bump * 0.5;
-    } else if (x >= this.w - this.bankSpan) {
+    } else if (rbOn && x >= this.w - this.bankSpan) {
       y = this._bankProfileY((this.w - x) / this.bankSpan) + n * bump * 0.5;
     } else {
       y = this.bedY + n * bump;
@@ -456,13 +460,24 @@ export class World {
 
   /** 最近一段岸线的点（龟上岸时先游到这儿）——必须落在真正的陆地列上 */
   shorePointNear(x) {
-    let bestX = this.waterLeftX, bd = Infinity, dir = -1;
+    let bestX = null, bd = Infinity, dir = -1;
     for (const s of this.waterSpans) {
       // 左缘 x0：外侧（陆地）在左 → dir=-1；右缘 x1：外侧在右 → dir=+1
       for (const e of [{ x: s.x0, d: -1 }, { x: s.x1, d: 1 }]) {
+        // ⚠️ 阶段 8-⑦ 取消右岸后，水域一路铺到画面右缘，那里的 x1 外侧是**屏幕边界**
+        //    而不是陆地 —— 龟游过去只会撞墙。所以先探一下外侧有没有岸，没有就跳过这个岸缘。
+        const probe = clamp(e.x + e.d * 3, 1, this.w - 1);
+        if (!this.isLandColumn(probe)) continue;
         const d = Math.abs(x - e.x);
         if (d < bd) { bd = d; bestX = e.x; dir = e.d; }
       }
+    }
+    if (bestX === null) {
+      // 极端情况：整片水面两侧都顶到屏幕边缘，一个岸都没有 → 退回水域中心，
+      // 别返回一个越界的假岸点让龟朝着屏幕外撞。
+      const s0 = this.waterSpans[0];
+      const cx = (s0.x0 + s0.x1) * 0.5;
+      return { x: cx, y: this.surfaceAt(cx) + 8 };
     }
     // 水缘可能落在水陆过渡带上 → 向外一步步挪到真正的陆列，龟才踩得上去
     let sx = bestX;
