@@ -240,10 +240,12 @@ export class Fish {
     this.x += this.vx * dt;
     this.y += this.vy * dt;
 
-    // 硬约束到水面
+    // ── 墙体交互（阶段 8-③）：沿墙滑行，而不是"撞停 / 掉头往下" ──
+    // 旧版是硬钳制 + `vx/vy *= -0.5` 整体反向；现在先做**切向全保留**的反射
+    // 与软避让（进入身体半径内沿法线加力），硬钳制只留作位置兜底、不再改速度方向。
+    this.world.wallResponse(this, 12, { dt });
+
     const c = this.world.constrainToWater(this.x, this.y, 10);
-    if (c.x !== this.x) this.vx *= -0.5;
-    if (c.y !== this.y) this.vy *= -0.5;
     this.x = c.x;
     this.y = c.y;
 

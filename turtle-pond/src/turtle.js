@@ -425,7 +425,18 @@ export class Turtle {
         const c = W.constrainToWater(this.x, this.y, this.size * 0.5);
         this.x = c.x; this.y = c.y;
       } else {
-        const c = W.constrainToWater(this.x, this.y, this.size * 0.45);
+        // 阶段 8-③：在水里先做"沿墙滑行"（切向保留的反射 + 软避让）。
+        // ⚠ 只有 SWIM / SEEK_FOOD 走这里：CLIMB_OUT / BASK / RETURN 是**故意穿越
+        //   水陆边界**的状态机，给它们加墙约束会让整段 climb_out 卡死（历史踩坑）。
+        const margin = this.size * 0.45;
+        const info = W.wallResponse(this, margin, { dt });
+        // 龟的 y 由 depthGoal 驱动（没有 vy 参与移动），所以竖直方向"离开墙"
+        // 要靠调 depthGoal：法线朝上（水面）→ 往深处去；朝下（池底）→ 往浅处去。
+        if (info.hit && Math.abs(info.ny) > 0.25) {
+          const k = Math.min(1, info.depth / Math.max(1, margin)) * 0.6 * dt;
+          this.depthGoal = clamp(this.depthGoal - info.ny * k, 0, 1);
+        }
+        const c = W.constrainToWater(this.x, this.y, margin);
         this.x = c.x; this.y = c.y;
       }
       this._syncDepthFromY();

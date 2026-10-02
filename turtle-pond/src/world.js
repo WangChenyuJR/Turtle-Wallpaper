@@ -351,6 +351,103 @@ export class World {
   }
 
   /**
+   * 最近的水体墙面（阶段 8-③）
+   *
+   * 侧视剖面下，"墙"其实只有两种：
+   *   ① **水面** —— 法线朝下，把生物往水里推；
+   *   ② **地表曲线** —— 池底 / 岸坡 / 晒台顶 / 晒台侧壁**本来就是同一条 `groundYAt`**，
+   *      区别只在局部坡度（平的是池底，陡的是岸坡与晒台侧壁）。
+   * 所以只要给出"向外法线 + 穿透深度"，生物就能做沿墙滑行。
+   *
+   * ⚠ 坡度用 **±3px 滑动窗口**估：地形自带 `hump*0.5 = ±2px` 的起伏噪声，
+   *   相邻两点差分算出的法线会随机乱抖（同"量坡度必须用滑动窗口"那条教训）。
+   *
+   * @param {number} x,y 生物位置
+   * @param {number} margin 身体半径（穿透按身体边缘算）
+   * @returns {{hit:boolean, nx:number, ny:number, depth:number, kind:string}}
+   *          `kind`: 'surface' | 'wall'（陡坡/晒台侧壁）| 'ground'（缓坡/池底）| 'none'
+   */
+  wallInfo(x, y, margin = 8) {
+    let depth = 0, nx = 0, ny = 0, kind = 'none';
+    const take = (d, ax, ay, k) => {
+      if (d > depth) { depth = d; nx = ax; ny = ay; kind = k; }
+    };
+
+    // ① 水面：法线朝下
+    const dTop = (this.surfaceAt(x) + margin) - y;
+    if (dTop > 0) take(dTop, 0, 1, 'surface');
+
+    // ② 地表曲线：**穿透 = 身体半径 − 到地表的垂直距离**（注意方向：
+    //    生物在水里，y 比 g(x) 小，`(g - y)` 是"离地还有多远"，
+    //    远大于 margin 时说明它好端端地待在水里，不该算碰墙）
+    const g = this.groundYAt(x);
+    const slope = (this.groundYAt(x + 3) - this.groundYAt(x - 3)) / 6;
+    const inv = 1 / Math.hypot(1, slope);
+    const dG = margin - (g - y) * inv;
+    if (dG > 0) take(dG, slope * inv, -inv, Math.abs(slope) > 0.6 ? 'wall' : 'ground');
+
+    return { hit: depth > 0, nx, ny, depth, kind };
+  }
+
+  /**
+   * 墙体响应（阶段 8-③）—— 在水里撞墙时"**沿墙滑行**"，而不是"贴墙下滑 / 撞一下掉头"。
+   *
+   * 旧做法（fish.js）：`constrainToWater` 硬钳制位置 + `vx/vy *= -0.5` 整体反向。
+   * 因为钳制是轴对齐的，沿斜岸时表现为"贴着墙往下滑"，正面则是"撞一下掉头"。
+   *
+   * 现在分三层：
+   *   ① **真反射**：只把**法向**速度按恢复系数 e 反向，切向速度**全保留**
+   *      （v' = v − (1+e)·(v·n)·n；e = 0.32 → 保留约 68% 切向速度）
+   *   ② **软避让**：进入 margin 内就沿法线加力，穿透越深越强（Boids 式墙避让）
+   *   ③ **角落脱困**：法向仍在往里钻、切向几乎不动 → 沿墙切向给一记随机助推（带冷却）
+   *
+   * ⚠ **只有 SWIM / SEEK_FOOD 可以调用**。CLIMB_OUT / BASK / RETURN 是
+   *   "故意穿越水陆边界"的状态机，给它们加墙约束会让整段 climb_out 卡死（历史踩坑）。
+   *
+   * @param {{x:number,y:number,vx:number,vy:number}} body 会被就地修改 vx/vy
+   * @param {number} margin 身体半径
+   * @param {{bounce?:number, push?:number, dt?:number, unstick?:number, stuckAfter?:number}} [opts]
+   * @returns {{hit:boolean,nx:number,ny:number,depth:number,kind:string}} 供调用方处理竖直维度
+   */
+  wallResponse(body, margin = 10, opts = {}) {
+    const info = this.wallInfo(body.x, body.y, margin);
+    if (!info.hit) { body._wallStuckT = 0; return info; }
+
+    const dt = opts.dt ?? 1 / 60;
+    const e = opts.bounce ?? CONFIG.natural?.wallBounce ?? 0.32;
+    const push = opts.push ?? CONFIG.natural?.wallPush ?? 90;
+
+    // ① 真反射（只反法向）
+    const vn = body.vx * info.nx + body.vy * info.ny;
+    if (vn < 0) {
+      body.vx -= (1 + e) * vn * info.nx;
+      body.vy -= (1 + e) * vn * info.ny;
+    }
+
+    // ② 软避让
+    const k = Math.min(1, info.depth / Math.max(1, margin)) * push * dt;
+    body.vx += info.nx * k;
+    body.vy += info.ny * k;
+
+    // ③ 角落脱困
+    const vn2 = body.vx * info.nx + body.vy * info.ny;
+    const vt = Math.max(0, Math.hypot(body.vx, body.vy) - Math.abs(vn2));
+    if (vn2 < -1 && vt < 4) {
+      body._wallStuckT = (body._wallStuckT ?? 0) + dt;
+      if (body._wallStuckT > (opts.stuckAfter ?? 0.6)) {
+        body._wallStuckT = 0;
+        const dir = Math.random() < 0.5 ? 1 : -1;
+        const s = opts.unstick ?? 34;
+        body.vx += -info.ny * dir * s;      // 切向 = (-ny, nx)
+        body.vy += info.nx * dir * s;
+      }
+    } else {
+      body._wallStuckT = 0;
+    }
+    return info;
+  }
+
+  /**
    * 该列是不是陆地（地表露出水面）。
    * 必须是 isWaterColumn 的严格补集：否则水陆之间会留出一条"既不算水也不算陆"
    * 的窄过渡带，龟游到水缘就卡在里面出不来（2026-10-02 修复）。
