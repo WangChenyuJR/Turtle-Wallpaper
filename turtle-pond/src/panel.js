@@ -7,13 +7,19 @@
  *   · Esc / × 按钮    → 关闭面板
  *   · 面板内名字可编辑，Enter 或失焦保存（localStorage 持久化）
  *
- * 图片约定：assets/creatures/{turtle|fish}/<id>_<top|side>.png
- *   只有部分品种有水彩图；无图品种自动退化为「矢量绘制帧」。
+ * 图鉴三视图（阶段 5-⑬ 统一新画法）：
+ *   · 俯视 / 侧视 —— creature-art.js 实时绘制（用该个体的 artSeed，与水塘里看到的一致）
+ *   · 水彩参考    —— assets/creatures/{turtle|fish}/<id>_<top|side>.png，
+ *                     只有部分品种有；加载成功才显示这一格，不影响前两格
  *
  * 资料来源：./data/species-research.js 的 TURTLE_RESEARCH / FISH_RESEARCH
  */
 
 import { TURTLE_RESEARCH, FISH_RESEARCH } from './data/species-research.js';
+import {
+  drawSideTurtle, drawTopTurtle, drawSideFish, drawTopFish,
+  turtleArt, fishArt,
+} from './creature-art.js';
 
 const STORE_NAMES = 'pond.names';   // { [uid]: name }
 const STORE_SEQ = 'pond.uidSeq';    // 递增计数器
@@ -66,6 +72,8 @@ const CSS = `
   width: 100%; aspect-ratio: 1/1; object-fit: contain; border-radius: 6px; display: block;
 }
 #creaturePanel .cp-views figcaption { font-size: 11px; color: #8a7a60; margin-top: 3px; }
+#creaturePanel .cp-views figure.cp-ref { display: none; }
+#creaturePanel .cp-views figure.cp-ref.cp-show { display: block; }
 #creaturePanel .cp-status {
   font-size: 12.5px; color: #2e5a44; background: rgba(120,180,140,0.14);
   border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; line-height: 1.5;
@@ -142,8 +150,9 @@ export class CreaturePanel {
       </div>
       <div class="cp-tags"></div>
       <div class="cp-views">
-        <figure><img class="cp-img-top" alt=""/><canvas class="cp-cv-top" width="120" height="120"></canvas><figcaption>俯视 Top</figcaption></figure>
-        <figure><img class="cp-img-side" alt=""/><canvas class="cp-cv-side" width="120" height="120"></canvas><figcaption>侧视 Side</figcaption></figure>
+        <figure><canvas class="cp-cv-top" width="120" height="120"></canvas><figcaption class="cp-cap-top">俯视 Top</figcaption></figure>
+        <figure><canvas class="cp-cv-side" width="120" height="120"></canvas><figcaption>侧视 Side</figcaption></figure>
+        <figure class="cp-ref"><img class="cp-img-ref" alt=""/><figcaption>水彩参考</figcaption></figure>
       </div>
       <div class="cp-status"></div>
       <div class="cp-info"></div>
@@ -176,46 +185,56 @@ export class CreaturePanel {
     this.app?.save?.touch();
   }
 
-  // ── 图片 ──────────────────────────────────────────────
-  _imageFor(kind, id, view) {
-    const key = `${kind}:${id}:${view}`;
+  // ── 图鉴绘制（阶段 5-⑬ 统一新画法）───────────────────
+  /** 每种画法的包围盒不同 → 各格单独定缩放与居中偏移（偏移单位 = 画法参数 s） */
+  static VIEW_GEO = {
+    turtleSide: { scale: 0.42, cx: 0.30, cy: -0.03 },
+    turtleTop:  { scale: 0.44, cx: 0.16, cy: 0 },
+    fishSide:   { scale: 0.44, cx: -0.32, cy: 0 },
+    fishTop:    { scale: 0.46, cx: -0.19, cy: 0 },
+  };
+
+  /** 把该个体（按它的 artSeed，与水塘里看到的一致）画进图鉴格子 */
+  _setVector(canvas, inst, view) {
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    ctx.clearRect(0, 0, W, canvas.height);
+    ctx.fillStyle = '#f4efe2';                      // 宣纸色衬底，与水彩参考衔接
+    ctx.fillRect(0, 0, W, canvas.height);
+
+    const isTurtle = this.app.turtles.includes(inst);
+    const P = isTurtle
+      ? turtleArt(inst.species, inst.artSeed ?? 0)
+      : fishArt(inst.species, inst.artSeed ?? 0);
+    const geo = this.constructor.VIEW_GEO[(isTurtle ? 'turtle' : 'fish') + (view === 'top' ? 'Top' : 'Side')];
+    const S = W * geo.scale;
+
+    ctx.save();
+    ctx.translate(W / 2 - S * geo.cx, canvas.height / 2 - S * geo.cy);
+    if (isTurtle) (view === 'top' ? drawTopTurtle : drawSideTurtle)(ctx, S, 0.6, P);
+    else (view === 'top' ? drawTopFish : drawSideFish)(ctx, S, 0.6, P);
+    ctx.restore();
+  }
+
+  /** 水彩参考：assets 里有该品种的 PNG 才亮出这一格（不占无图品种的版面） */
+  _setRef(inst, kind, id) {
+    const fig = this.el.querySelector('.cp-views figure.cp-ref');
+    const img = fig.querySelector('.cp-img-ref');
+    const cached = this._imageFor(kind, id);
+    fig.classList.remove('cp-show');
+    img.onload = () => { if (this.selected === inst) fig.classList.add('cp-show'); };
+    if (cached.complete && cached.naturalWidth > 0) fig.classList.add('cp-show');
+  }
+
+  /** 预载品种水彩图（side 优先；加载失败置 _failed，不报错） */
+  _imageFor(kind, id) {
+    const key = `${kind}:${id}:ref`;
     if (this._imgCache.has(key)) return this._imgCache.get(key);
     const img = new Image();
-    img.src = `assets/creatures/${kind}/${id}_${view}.png`;
+    img.src = `assets/creatures/${kind}/${id}_side.png`;
     img.onerror = () => { img._failed = true; };
     this._imgCache.set(key, img);
     return img;
-  }
-
-  /** 矢量绘制帧（无图品种 fallback）：把当前实例画到小画布上 */
-  _drawVectorThumb(canvas, inst, angleOverride = 0) {
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const oldAngle = inst.angle;
-    inst.angle = angleOverride;               // 临时统一朝向，画完恢复
-    const est = inst.size * 3.6;              // 体长+四肢余量的估算包围盒
-    const scale = (canvas.width * 0.82) / est;
-    ctx.save();
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.scale(scale, scale);
-    ctx.translate(-inst.x, -inst.y);
-    inst.draw(ctx);
-    ctx.restore();
-    inst.angle = oldAngle;
-  }
-
-  _setView(figureImgSel, figureCvSel, kind, id, view, inst) {
-    const img = this.el.querySelector(figureImgSel);
-    const cv = this.el.querySelector(figureCvSel);
-    const cached = this._imageFor(kind, id, view);
-    const useImg = () => { img.style.display = 'block'; cv.style.display = 'none'; img.src = cached.src; };
-    const useCv = () => { img.style.display = 'none'; cv.style.display = 'block'; this._drawVectorThumb(cv, inst); };
-
-    if (cached._failed) { useCv(); return; }
-    if (cached.complete && cached.naturalWidth > 0) { useImg(); return; }
-    // 尚未加载完：先画矢量帧，加载成功后切图
-    useCv();
-    cached.onload = () => { if (this.selected === inst) useImg(); };
   }
 
   // ── 打开 / 关闭 ───────────────────────────────────────
@@ -239,9 +258,10 @@ export class CreaturePanel {
       tags.innerHTML = `<b>${sp.label}</b> · ${stage}`;
     }
 
-    // 三视图（俯视 + 侧视；无图自动矢量帧）
-    this._setView('.cp-img-top', '.cp-cv-top', kind, sp.id, 'top', inst);
-    this._setView('.cp-img-side', '.cp-cv-side', kind, sp.id, 'side', inst);
+    // 图鉴三视图：俯视/侧视 = 新画法实时绘制（带该个体 artSeed）；水彩 = 有图才显示
+    this._setVector('.cp-cv-top', inst, 'top');
+    this._setVector('.cp-cv-side', inst, 'side');
+    this._setRef(inst, kind, sp.id);
 
     // 静态资料
     this._renderInfo(kind, sp);

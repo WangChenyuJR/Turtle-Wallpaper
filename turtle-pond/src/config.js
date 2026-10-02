@@ -37,6 +37,12 @@ export const CONFIG = {
     shellColors: ['#5b7c3a', '#6b5a3e', '#4a6b4a'],
   },
 
+  // ── 美术（阶段 5-⑬ 新画法）──────────────────────────
+  art: {
+    turtleScale: 0.72,   // 龟侧视立绘缩放（size → 画法单位 s；画面总宽 ≈ 1.9 × s）
+    fishScale: 1.5,      // 鱼侧视立绘缩放（size → 画法单位 s）
+  },
+
   // ── 浮萍 ──────────────────────────────────────────────
   duckweed: {
     count: 60,
@@ -182,14 +188,47 @@ export const CONFIG = {
     bottomSilt: true,      // 水底沉积颗粒/泥沙浊度
     bankTexture: true,     // 岸边沙粒与湿泥纹理
     cursorWake: true,      // 鼠标水面尾迹（真实波动方程）
-    cursorWakeMinDist: 6,  // 光标移动多少像素才补一次扰动
-    // ── 真实波动方程水场（阶段 5-⑪）──────────────────
+    cursorWakeMinDist: 9,  // 光标移动多少像素才补一次扰动（越大越稀疏）
+    // ── 真实波动方程水场（阶段 5-⑪，§调节指南见文件末尾注释）──
     wave: true,            // 总开关：关掉退回旧的多频波纹
     waveCell: 7,           // 波场网格每格像素（越小越精细越费）
     waveBlock: 6,          // 渲染块大小（每块读一次梯度着色）
     waveSurface: true,     // 是否渲染波场的折射明暗
+    waveDamping: 0.978,    // 阻尼：越小波越快平息（波"活"的时间 = 扩散范围）
+    waveAmbientGap: 1.6,   // 环境微扰间隔（秒）；越大背景越静。≤0 = 关闭
+    waveAmbientStr: 0.05,  // 环境微扰强度（原 0.09~0.19）
+    waveCursorStr: 0.62,   // 鼠标扰动基准强度系数（原 0.35~1.5）
+    waveCursorRadius: 2,   // 鼠标扰动半径（格）；2 = 收窄但仍有余韵
+    waveFishStr: 0.55,     // 鱼游动起波强度系数（原 0.045+size*0.004）
+    waveTurtleStr: 0.07,   // 龟游动起波强度（原 0.12）
+    waveSwimGap: 0.6,      // 鱼/龟起波间隔（秒）；越大越稀疏
+    waveSizeExp: 2.4,      // 起波强度的体型指数：越大个体差异越夸张（1=近似均匀）
+    waveSizeJitter: 0.25,  // 同体型个体间的随机个性幅度（0=完全一致，0.25=±25%）
     // ── 程序化地表纹理（阶段 5-⑪）────────────────────
     terrainTex: true,      // 岸边/水底是否叠加程序化泥/沙纹理
     terrainTexAlpha: 0.55, // 纹理叠加强度
   },
 };
+
+/*
+ * ┌─────────────────────────────────────────────────────────────┐
+ * │ 水面波浪手感调节速查（只改上面 CONFIG.natural 里的值即可）      │
+ * ├─────────────────────────────────────────────────────────────┤
+ * │ 想更静一点     → waveAmbientGap ↑ (1.6→3)、waveAmbientStr ↓   │
+ * │                  waveDamping ↓ (0.978→0.965)                  │
+ * │ 想更活一点     → waveAmbientGap ↓ (1.6→0.8)、waveAmbientStr ↑ │
+ * │                  waveDamping ↑ (0.978→0.988)                  │
+ * │ 鼠标波纹太大   → waveCursorRadius = 1、waveCursorStr ↓        │
+ * │ 鼠标波纹太稀   → cursorWakeMinDist ↓ (9→4)                    │
+ * │ 鼠标波纹太频繁 → cursorWakeMinDist ↑ (9→16)、waveCursorStr ↓  │
+ * │ 鱼龟太闹       → waveSwimGap ↑ (0.6→1.2)、waveFishStr ↓       │
+ * │ 个体差异不够   → waveSizeExp ↑ (2.4→3)、waveSizeJitter ↑      │
+ * │ 个体差异过头   → waveSizeExp ↓ (2.4→1.6)、waveSizeJitter ↓    │
+ * │ 完全关掉生物起波 → waveFishStr: 0, waveTurtleStr: 0          │
+ * │ 完全关掉背景     → waveAmbientGap: 0                          │
+ * │ 想回到 5-⑪ 初始  → damping 0.985 / ambient 0.35,0.09 /        │
+ * │                    cursor 0.35~1.5,r2 / swim 0.3             │
+ * │ 当前实测定量：波扩散 577→287px(-50%)，峰值 -62%，           │
+ * │              背景扰动 171→33 次/分(-81%)，鱼群 -50%          │
+ * └─────────────────────────────────────────────────────────────┘
+ */

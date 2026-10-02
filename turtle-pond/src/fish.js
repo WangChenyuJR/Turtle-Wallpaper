@@ -13,6 +13,7 @@ import { CONFIG } from './config.js';
 import { rand, randInt, limit, clamp } from './utils.js';
 import { pickFishSpecies, FISH_SPECIES } from './species.js';
 import { dist2 } from './utils.js';
+import { drawSideFish, fishArt } from './creature-art.js';
 
 export class Fish {
   /**
@@ -42,8 +43,13 @@ export class Fish {
     this.vx = Math.cos(a) * this.maxSpeed * 0.5;
     this.vy = Math.sin(a) * this.maxSpeed * 0.5;
 
-    this.angle = a;          // 朝向（用于绘制）
+    this.angle = a;          // 游动方向（物理层仍用）
     this.tailPhase = rand(0, Math.PI * 2);
+
+    // ── 美术（阶段 5-⑬ 新画法）────────────────────────
+    this.artSeed = opts.artSeed ?? ((Math.random() * 0xffffffff) >>> 0);  // 个体外观种子（存档持久化）
+    this.facing = Math.cos(a) >= 0 ? 1 : -1;   // 朝向：1 右 / -1 左
+    this.pitch = 0;                            // 俯仰角（rad，随垂直速度轻微摆动）
     this.hunger = opts.baby ? 0.5 : rand(0.1, 0.5);
     this.dead = false;
     // 繁殖
@@ -249,6 +255,12 @@ export class Fish {
       while (d < -Math.PI) d += Math.PI * 2;
       this.angle += d * Math.min(1, dt * 8);
     }
+
+    // ── 朝向与俯仰（阶段 5-⑬：侧视立绘不随 angle 整体旋转）──
+    if (this.vx > 2) this.facing = 1;
+    else if (this.vx < -2) this.facing = -1;
+    const targetPitch = clamp(this.vy / (this.maxSpeed ?? 40), -1, 1) * 0.16;
+    this.pitch += (targetPitch - this.pitch) * Math.min(1, dt * 5);
   }
 
   // ── 生命周期（阶段 5-⑥）────────────────────────────
@@ -283,101 +295,48 @@ export class Fish {
     return Math.round(Math.abs(this.tailPhase) * 3);
   }
 
+  /** 皮肤：品种字段 + 个体种子 → 画法参数（缓存到实例） */
+  _skin() {
+    if (!this._skinP || this._skinSeed !== this.artSeed) {
+      this._skinP = fishArt(this.species, this.artSeed);
+      this._skinSeed = this.artSeed;
+    }
+    return this._skinP;
+  }
+
   draw(ctx) {
-    const L = this.size * 1.6;
-    const W = this.size * 0.62;
-    const sp = this.species;
+    const P = this._skin();
+    const S = this.size * (CONFIG.art?.fishScale ?? 1.5);
     const baby = !this.isAdult;
 
     ctx.save();
     ctx.translate(this.x, this.y);
-    ctx.rotate(this.angle);
 
-    // 死亡渐隐（阶段 5-⑥）：停摆 + 泛白 + 淡出
+    // 死亡渐隐（阶段 5-⑥）：停摆 + 淡出；幼苗更透亮
     if (this.dying) {
       const D = CONFIG.life?.dyingDuration ?? 2.5;
       ctx.globalAlpha = clamp(this.dyingTimer / (D * 0.45), 0, 1);
     } else if (baby) {
-      // 幼苗更透亮
       ctx.globalAlpha = 0.85;
     }
 
-    const wig = this.dying ? 0 : Math.sin(this.tailPhase) * 0.5;
-    const tailLen = sp.fancyTail ? 1.35 : 0.95;
-
-    // 尾鳍
-    ctx.fillStyle = sp.fin;
-    ctx.globalAlpha = sp.fancyTail ? 0.85 : 1;
-    ctx.beginPath();
-    ctx.moveTo(-L * 0.5, 0);
-    ctx.lineTo(-L * tailLen, -W * (sp.fancyTail ? 1.1 : 0.75) + wig * W);
-    ctx.lineTo(-L * 0.85, 0);
-    ctx.lineTo(-L * tailLen, W * (sp.fancyTail ? 1.1 : 0.75) + wig * W);
-    ctx.closePath();
-    ctx.fill();
-    ctx.globalAlpha = 1;
-
-    // 身体
-    ctx.fillStyle = sp.body;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, L * 0.5, W * 0.5, 0, 0, Math.PI * 2);
-    ctx.fill();
-    // 死亡泛白（阶段 5-⑥）
     if (this.dying) {
-      ctx.fillStyle = 'rgba(235,240,242,0.45)';
+      // 翻肚漂浮：垂直镜像（肚朝天）+ 慢摆
+      ctx.scale(this.facing || 1, -1);
+      ctx.rotate(Math.sin(this.tailPhase * 0.8) * 0.05);
+      drawSideFish(ctx, S, this.tailPhase, P);
+      // 泛白
+      ctx.fillStyle = 'rgba(235,240,242,0.4)';
       ctx.beginPath();
-      ctx.ellipse(0, 0, L * 0.5, W * 0.5, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, S * 0.5, S * 0.24, 0, 0, Math.PI * 2);
       ctx.fill();
+    } else {
+      // 侧视立绘：水平镜像 + 轻微俯仰（阶段 5-⑬）
+      ctx.scale(this.facing || 1, 1);
+      ctx.rotate(this.pitch ?? 0);
+      drawSideFish(ctx, S, this.tailPhase, P);
     }
 
-    // 腹部浅色高光
-    if (sp.belly) {
-      ctx.save();
-      ctx.globalAlpha = 0.5;
-      ctx.fillStyle = sp.belly;
-      ctx.beginPath();
-      ctx.ellipse(L * 0.05, W * 0.16, L * 0.34, W * 0.2, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-
-    // 条纹
-    if (sp.stripes > 0) {
-      ctx.save();
-      ctx.globalAlpha = 0.4;
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 1.2;
-      for (let i = 0; i < sp.stripes; i++) {
-        const px = -L * 0.15 + i * L * 0.25;
-        ctx.beginPath();
-        ctx.moveTo(px, -W * 0.42);
-        ctx.lineTo(px - L * 0.08, W * 0.42);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    // 背鳍
-    ctx.fillStyle = sp.fin;
-    ctx.beginPath();
-    ctx.moveTo(-L * 0.08, -W * 0.42);
-    ctx.lineTo(L * 0.08, -W * 0.42);
-    ctx.lineTo(-L * 0.01, -W * 0.85);
-    ctx.closePath();
-    ctx.fill();
-
-    // 眼睛（幼苗眼睛相对更大，更显可爱）
-    const eyeScale = baby ? 1.6 : 1.0;
-    ctx.fillStyle = '#0d0d0d';
-    ctx.beginPath();
-    ctx.arc(L * 0.3, -W * 0.12, Math.max(1.2, W * 0.14) * eyeScale, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    ctx.arc(L * 0.33, -W * 0.16, Math.max(0.5, W * 0.06) * eyeScale, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.globalAlpha = 1;
     ctx.restore();
   }
 }

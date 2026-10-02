@@ -9,6 +9,14 @@
  * 绘制参数说明（2D 矢量绘制，无贴图依赖）：
  *   鱼：body/fin/stripes/sizeScale/speedScale
  *   龟：shell/limb/pattern/sizeScale
+ *
+ * 美术特征字段（阶段 5-⑬ 新画法，creature-art.js 消费）：
+ *   artMark    头颈标志  throat 喉纹+眼后纵纹 / ear 耳后斑 / line 头侧细线 / none
+ *   artPattern 背甲纹样  scutes 盾缝+缘盾 / rings 同心环 / lines 密纵纹 /
+ *                        rim 黄缘带 / smooth 平滑
+ *   snout      吻端前凸量（甲鱼/枯叶龟长吻）
+ *   未写时按旧 pattern 字段兜底映射（rings→rings / stripes→scutes /
+ *   lines→lines / smooth→smooth），自定义品种不写也能画。
  */
 
 // ══════════════════════════════════════════════════════════
@@ -111,6 +119,8 @@ export const TURTLE_SPECIES = {
     head: '#5c6e3e',
     pattern: 'rings',
     markColor: '#d94f3d',    // 耳后红斑
+    artMark: 'ear',          // 新画法：耳后红斑是最强识别特征
+    artPattern: 'scutes',
     sizeScale: 1.0,
     speedScale: 1.0,
     weight: 3,
@@ -124,6 +134,8 @@ export const TURTLE_SPECIES = {
     head: '#6b5a3e',
     pattern: 'rings',
     markColor: '#d9c04f',
+    artMark: 'throat',
+    artPattern: 'rim',       // 新画法：壳缘一圈黄带（本种命名特征）
     sizeScale: 0.95,
     speedScale: 0.95,
     baskingChance: 0.82,
@@ -140,6 +152,8 @@ export const TURTLE_SPECIES = {
     head: '#44503a',
     pattern: 'stripes',
     markColor: '#8a9a5b',
+    artMark: 'line',         // 头侧细纵线（草龟属特征）
+    artPattern: 'scutes',
     sizeScale: 1.05,
     speedScale: 1.0,
     weight: 2,
@@ -153,6 +167,9 @@ export const TURTLE_SPECIES = {
     head: '#5a5340',
     pattern: 'smooth',       // 无壳纹、扁平
     markColor: '#7a7358',
+    artMark: 'none',         // 新画法：无头纹 + 平滑扁壳 + 长吻
+    artPattern: 'smooth',
+    snout: 0.11,
     sizeScale: 1.15,
     speedScale: 1.15,
     flat: true,
@@ -170,6 +187,8 @@ export const TURTLE_SPECIES = {
     head: '#6b6042',
     pattern: 'lines',
     markColor: '#c9b04f',
+    artMark: 'line',
+    artPattern: 'lines',     // 新画法：背甲细密"地图纹"
     sizeScale: 0.9,
     speedScale: 0.95,
     baskingChance: 0.28,
@@ -186,6 +205,9 @@ export const TURTLE_SPECIES = {
     head: '#6b5238',
     pattern: 'smooth',
     markColor: '#7a6244',
+    artMark: 'none',         // 新画法：无头纹 + 扁壳 + 枯叶色长吻
+    artPattern: 'smooth',
+    snout: 0.14,
     sizeScale: 1.2,
     speedScale: 0.8,
     flat: true,
@@ -203,6 +225,8 @@ export const TURTLE_SPECIES = {
     head: '#766440',
     pattern: 'rings',
     markColor: '#c2a95a',
+    artMark: 'throat',
+    artPattern: 'rings',     // 陆龟生长纹 → 同心环
     sizeScale: 1.25,
     speedScale: 0.85,
     baskingChance: 0.9,
@@ -221,6 +245,8 @@ export const TURTLE_SPECIES = {
     head: '#8a8040',
     pattern: 'lines',
     markColor: '#e8d24e',    // 头侧镶黑边淡黄纵纹
+    artMark: 'throat',       // 新画法：眼后黄纵纹 + 下颌喉部黄（本种命名特征）
+    artPattern: 'scutes',
     sizeScale: 1.0,
     speedScale: 1.0,
     weight: 2,
@@ -234,6 +260,8 @@ export const TURTLE_SPECIES = {
     head: '#7a6550',
     pattern: 'smooth',
     markColor: '#d8c9a0',
+    artMark: 'throat',
+    artPattern: 'smooth',    // 侧颈类壳面平滑
     sizeScale: 1.0,
     speedScale: 0.95,
     weight: 2,
@@ -248,6 +276,8 @@ export const TURTLE_SPECIES = {
     head: '#c49a58',
     pattern: 'rings',
     markColor: '#e8a94e',    // 淡化橘黄耳斑
+    artMark: 'ear',
+    artPattern: 'scutes',
     sizeScale: 1.0,
     speedScale: 1.0,
     weight: 1,
@@ -261,6 +291,8 @@ export const TURTLE_SPECIES = {
     head: '#514327',
     pattern: 'lines',
     markColor: '#e6c04e',    // 金黄线条
+    artMark: 'line',
+    artPattern: 'lines',     // 新画法：壳面密纵金线
     sizeScale: 1.05,
     speedScale: 1.0,
     weight: 1,
@@ -274,6 +306,8 @@ export const TURTLE_SPECIES = {
     head: '#7a503f',
     pattern: 'smooth',
     markColor: '#e0735a',
+    artMark: 'ear',
+    artPattern: 'smooth',
     sizeScale: 1.0,
     speedScale: 1.0,
     baskingChance: 0.22,
@@ -290,6 +324,8 @@ export const TURTLE_SPECIES = {
     head: '#8a8470',
     pattern: 'rings',
     markColor: '#cfc08a',
+    artMark: 'line',
+    artPattern: 'rings',     // 新画法：同心钻纹（本种命名特征）
     sizeScale: 0.95,
     speedScale: 1.0,
     baskingChance: 0.35,

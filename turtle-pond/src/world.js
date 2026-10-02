@@ -25,7 +25,13 @@ export class World {
     this._buildTerrain();
     this._buildRipples();
     // 真实波动方程水场（阶段 5-⑪）：逐帧求解 2D 波动方程，波与波真实干涉
-    this.wave = new WaterWaveField(width, height, CONFIG.natural?.waveCell ?? 7);
+    // 手感参数（阻尼 / 环境微扰）全部从 CONFIG.natural 读取，改 config 即可调
+    const nat = CONFIG.natural ?? {};
+    this.wave = new WaterWaveField(width, height, nat.waveCell ?? 7, {
+      damping: nat.waveDamping ?? 0.985,
+      ambientGap: nat.waveAmbientGap ?? 0.35,
+      ambientStr: nat.waveAmbientStr ?? 0.09,
+    });
     // 只有水面区域才允许环境微扰（岸上不波动）
     this.wave.ambientFilter = (x, y) => this.isWater(x, y);
     // 程序化地表纹理（泥/沙/淤积），首次渲染惰性生成
@@ -103,11 +109,15 @@ export class World {
     return y >= this.marshLineAt(x) - 6;
   }
 
-  /** 把点约束到水面区域内 */
+  /** 把点约束到水面区域内（返回的点保证仍落在 isWater 范围内） */
   constrainToWater(x, y, margin = 8) {
-    const cx = clamp(x, margin, this.w - margin);
-    const top = this.bankLineAt(cx) + margin;
-    const bot = this.marshLineAt(cx) - margin;
+    // margin 至少留出 8px：isWater 用的是 ±6 的内缩带，
+    // 若 margin 比它小（小龟体型×0.4 可能只有 5px），约束后反而会落回岸上/泥沼，
+    // 生物就会在边界上来回卡住。
+    const m = Math.max(8, margin);
+    const cx = clamp(x, m, this.w - m);
+    const top = this.bankLineAt(cx) + m;
+    const bot = this.marshLineAt(cx) - m;
     return { x: cx, y: clamp(y, top, Math.max(top, bot)) };
   }
 
@@ -310,10 +320,14 @@ export class World {
    */
   addWake(x0, y0, x1, y1, speed = 0) {
     if (!this.wave) return;
-    const s = clamp(0.35 + speed / 1400, 0.35, 1.5);
+    const nat = CONFIG.natural ?? {};
+    // 强度：基准系数 × 速度增量；半径走 CONFIG（默认 1 格 = 只在近处起一两圈）
+    const k = nat.waveCursorStr ?? 0.55;
+    const s = clamp(k * (0.4 + speed / 1400), k * 0.4, k * 1.6);
+    const rad = nat.waveCursorRadius ?? 1;
     // 起点不在水面就跳过（避免岸上拖动也起波）
     if (!this.isWater(x1, y1)) return;
-    this.wave.disturbLine(x0, y0, x1, y1, s, 2);
+    this.wave.disturbLine(x0, y0, x1, y1, s, rad);
   }
 
   update(dt) {

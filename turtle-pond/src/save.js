@@ -337,6 +337,7 @@ function serializeFish(f) {
     birth: r3(f.birth ?? 0),
     eaten: f.eaten ?? 0,
     offspring: f.offspring ?? 0,
+    seed: f.artSeed ?? 0,         // 个体外观种子（阶段 5-⑬；老档无此字段走随机兜底）
   };
 }
 
@@ -360,9 +361,11 @@ function serializeTurtle(t) {
     decisionTimer: r3(t.decisionTimer),
     baskGoal: t._baskGoal == null ? null : r3(t._baskGoal),
     baskTarget: t.baskTarget ? { x: r3(t.baskTarget.x), y: r3(t.baskTarget.y) } : null,
+    landOnly: !!t._landOnlyReturn,   // 本次回水是否"只换岸边位置不下水"（进 RETURN 时掷的骰子）
     flipperPhase: r3(t.flipperPhase),
     headBob: r3(t.headBob),
     shellColor: t.shellColor,
+    seed: t.artSeed ?? 0,         // 个体外观种子（阶段 5-⑬；老档无此字段走随机兜底）
   };
 }
 
@@ -591,6 +594,8 @@ function restoreFish(f, d) {
   f.eaten = d.eaten ?? 0;
   f.offspring = d.offspring ?? 0;
   if (d.uid) f._uid = d.uid;              // 名字表按 uid 对齐
+  // 个体外观种子（可选字段：老档没有 → 保留构造时的随机值，不升 SCHEMA）
+  if (Number.isFinite(d.seed) && d.seed > 0) f.artSeed = d.seed;
   f._applySpeed();                        // 体型变了要重算速度
 }
 
@@ -614,10 +619,13 @@ function restoreTurtle(t, d) {
   t.stateTime = num(d.stateTime, 0);
   t.decisionTimer = num(d.decisionTimer, t.decisionTimer);
   t._baskGoal = d.baskGoal == null ? null : num(d.baskGoal);
+  t._landOnlyReturn = !!d.landOnly;   // 老档无此字段 → false（下次回水正常下水）
   t.baskTarget = d.baskTarget ? { x: num(d.baskTarget.x), y: num(d.baskTarget.y) } : null;
   t.flipperPhase = num(d.flipperPhase, t.flipperPhase);
   t.headBob = num(d.headBob, t.headBob);
   if (typeof d.shellColor === 'string') t.shellColor = d.shellColor;
+  // 个体外观种子（可选字段：老档没有 → 保留构造时的随机值，不升 SCHEMA）
+  if (Number.isFinite(d.seed) && d.seed > 0) t.artSeed = d.seed;
   if (d.uid) t._uid = d.uid;
 }
 

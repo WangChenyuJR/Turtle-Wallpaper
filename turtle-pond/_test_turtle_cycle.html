@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>乌龟水陆往返 回归测试（上岸 → 重新下水）</title>
+  <style>
+    body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
+    #pond { display: block; opacity: 0.28; }
+    #report {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.9); padding: 12px; font-size: 13px;
+      white-space: pre-wrap; max-height: 100vh; overflow: auto; z-index: 9;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pond"></canvas>
+  <div id="report">运行中…</div>
+  <!--
+    说明：刻意不加载 main.js（它的 rAF 循环会让 headless 的
+    --virtual-time-budget 一直快进渲染帧，转储/截图要等十几分钟）。
+    本页直接装载真实模块（world/turtle/species/creature-art），
+    用与 main.js 相同的调用方式驱动乌龟，并把结果画上 canvas + 写进 #report。
+  -->
+  <script type="module">
+    import { World } from './src/world.js';
+    import { Turtle } from './src/turtle.js';
+    import { TURTLE_SPECIES } from './src/species.js';
+
+    const log = [];
+    let pass = 0, fail = 0;
+    const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+    const DT = 1 / 60;
+    const ENV = { light: 1, isNight: false, rain: false };   // 白天晴天：最该上岸/回水
+    const CUR = { active: false, x: 0, y: 0 };
+
+    const canvas = document.getElementById('pond');
+    canvas.width = 1200; canvas.height = 760;
+    const W = new World(canvas.width, canvas.height);
+    const ctx = canvas.getContext('2d');
+
+    let splashes = 0;
+    /** 按 main.js 的同一套调用顺序推进乌龟，顺带统计"入水溅水"触发次数 */
+    function step(turtles, seconds) {
+      for (let i = 0; i < Math.round(seconds / DT); i++) {
+        for (const t of turtles) {
+          const wasInWater = W.isWater(t.x, t.y);
+          t.update(DT, [], CUR, turtles, ENV);
+          if (!wasInWater && W.isWater(t.x, t.y) && !t.dying) splashes++;
+        }
+      }
+    }
+    /** 把龟放到岸上并立刻结束本次晒背 → 进入 RETURN */
+    function putOnBank(t) {
+      const x = W.w * (0.35 + Math.random() * 0.3);
+      t.x = x;
+      t.y = W.bankLineAt(x) - 18;
+      t.state = 'bask';
+      t.stateTime = 999;
+      t._baskGoal = 1;
+      t._landOnlyReturn = false;      // 强制走"真的下水"分支
+      t.angle = Math.PI / 2;          // 朝下（朝水）
+    }
+    const isWaterState = (t) => t.state === 'swim' || t.state === 'seek_food';
+
+    try {
+      // ── 1. 全品种：上岸 → 水里 ─────────────────────────
+      log.push('── 1. 全部龟品种：上岸晒背后能否重新下水 ──');
+      const backTimes = [];
+      for (const sp of Object.values(TURTLE_SPECIES)) {
+        const t = new Turtle(W, 0, sp, { artSeed: 99 });
+        putOnBank(t);
+        let t1 = -1;
+        for (let i = 0; i < 60 * 60; i++) {
+          t.update(DT, [], CUR, [], ENV);
+          if (isWaterState(t) && W.isWater(t.x, t.y)) { t1 = i * DT; break; }
+        }
+        backTimes.push(t1);
+        const forced = sp.habitat === 'terrestrial';   // 陆龟默认赖在岸上（已强制真下水分支）
+        ok(t1 >= 0, `${sp.label}(${sp.habitat}) 上岸后下水${forced ? '（强制真下水分支）' : ''}`
+          + (t1 >= 0 ? `，用时 ${t1.toFixed(1)}s` : ` ❌ 卡在 ${t.state} y=${t.y.toFixed(1)} 入水线=${(W.bankLineAt(t.x) + 6).toFixed(1)}`));
+      }
+
+      // ── 2. 全品种：水里 → 上岸（确认没有反向卡死）──────
+      log.push('');
+      log.push('── 2. 全部龟品种：水中能否爬上岸晒背 ──');
+      for (const sp of Object.values(TURTLE_SPECIES)) {
+        const t = new Turtle(W, 0, sp, { artSeed: 98 });
+        t.x = W.w * 0.5;
+        t.y = (W.bankLineAt(t.x) + W.marshLineAt(t.x)) / 2;
+        t.state = 'climb_out';
+        t._pickBaskTarget();
+        let t2 = -1;
+        for (let i = 0; i < 60 * 90; i++) {
+          t.update(DT, [], CUR, [], ENV);
+          if (t.state === 'bask') { t2 = i * DT; break; }
+        }
+        ok(t2 >= 0, `${sp.label} 水中能爬上岸晒背`
+          + (t2 >= 0 ? `，用时 ${t2.toFixed(1)}s` : ` ❌ 卡在 ${t.state}`));
+      }
+
+      // ── 3. 长跑：状态不滞留 ───────────────────────────
+      log.push('');
+      log.push('── 3. 半水龟连续跑 12 分钟（含昼夜），状态不应滞留 ──');
+      const dwell = {};
+      let cycTotal = 0, ashore = false;
+      const herd = ['redear', 'chinese', 'yellowthroat'].map((id) => new Turtle(W, 0, TURTLE_SPECIES[id], { artSeed: 7 }));
+      const prev = new Map();
+      for (let i = 0; i < 60 * 60 * 12; i++) {
+        const env = { ...ENV, isNight: (i % (60 * 360)) > 60 * 180 };
+        for (const t of herd) {
+          t.update(DT, [], CUR, herd, env);
+          const p = prev.get(t) ?? { s: null, d: 0 };
+          if (p.s === t.state) p.d += DT; else { p.d = DT; p.s = t.state; }
+          dwell[t.state] = Math.max(dwell[t.state] ?? 0, p.d);
+          prev.set(t, p);
+          if (t.state === 'bask') ashore = true;
+          else if (isWaterState(t) && ashore) { ashore = false; cycTotal++; }
+        }
+      }
+      const mx = (k) => (dwell[k] ?? 0).toFixed(1) + 's';
+      ok((dwell.return ?? 0) < 30, `「回水」状态不滞留（最长 ${mx('return')}）`);
+      ok((dwell.climb_out ?? 0) < 60, `「上岸」状态不滞留（最长 ${mx('climb_out')}）`);
+      ok(cycTotal > 0, `12 分钟内 3 只半水龟共完成 ${cycTotal} 次 上岸→回水 循环`);
+
+      // ── 4. 破壳幼龟下水（出生点在岸上，state=return）──
+      log.push('');
+      log.push('── 4. 破壳幼龟（出生在岸上）下水 ──');
+      for (const id of ['redear', 'yellowthroat']) {
+        const baby = new Turtle(W, 0, TURTLE_SPECIES[id], { baby: true, artSeed: 5 });
+        const x = W.w * 0.4;
+        baby.x = x;
+        baby.y = W.bankLineAt(x) + 14;    // main.js 破壳时的落点
+        baby.state = 'return';
+        let t3 = -1;
+        for (let i = 0; i < 60 * 60; i++) {
+          baby.update(DT, [], CUR, [], ENV);
+          if (isWaterState(baby) && W.isWater(baby.x, baby.y)) { t3 = i * DT; break; }
+        }
+        ok(t3 >= 0, `${TURTLE_SPECIES[id].label}幼龟(size=${baby.size.toFixed(1)}) 下水`
+          + (t3 >= 0 ? `，用时 ${t3.toFixed(1)}s` : ` ❌ 卡在 ${baby.state}`));
+      }
+
+      // ── 5. 渲染一帧（新画法 + 新位置）无异常 ───────────
+      log.push('');
+      let threw = null;
+      try {
+        W.draw(ctx, 12.3);
+        for (const sp of Object.values(TURTLE_SPECIES)) {
+          const t = new Turtle(W, 0, sp, { artSeed: 3 });
+          t.x = W.w * 0.2 + Math.random() * W.w * 0.6;
+          t.y = W.bankLineAt(t.x) + 20 + Math.random() * 80;
+          t.draw(ctx);
+        }
+      } catch (e) { threw = e; }
+      ok(!threw, '场景 + 全品种乌龟渲染无异常' + (threw ? '：' + threw.message : ''));
+
+      log.unshift(`━━ 结果：${pass} 通过 / ${fail} 失败 ━━`);
+    } catch (e) {
+      fail++;
+      log.unshift(`━━ 崩溃：${e.message ?? e} ━━`, String(e.stack ?? ''));
+    }
+
+    document.getElementById('report').textContent = log.join('\n');
+    window.__TEST__ = { pass, fail, log };
+    document.title = `done:${pass}:${fail}`;
+
+    // 结果也画上 canvas 左上角（万一 report 被 DOM 问题吞掉，截图仍可读）
+    ctx.save();
+    ctx.globalAlpha = 0.94;
+    ctx.fillStyle = '#0b1520';
+    ctx.fillRect(6, 6, 560, 34);
+    ctx.strokeStyle = fail ? '#e05555' : '#57d977';
+    ctx.strokeRect(6, 6, 560, 34);
+    ctx.fillStyle = fail ? '#ff8d8d' : '#8df0a8';
+    ctx.font = 'bold 18px Consolas, monospace';
+    ctx.fillText(`TURTLE-CYCLE ${pass}/${pass + fail}${fail ? ' FAIL' : ' PASS'}`, 18, 30);
+    ctx.restore();
+  </script>
+</body>
+</html>

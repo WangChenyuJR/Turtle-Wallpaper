@@ -708,22 +708,50 @@ class PondApp {
     // 世界（涟漪 + 真实波场推进）
     this.world.update(dt);
 
-    // ── 生物游动尾迹（阶段 5-⑪）：鱼/龟在水中游过留下真实扩散的波 ──
-    // 每 0.3s 一批（而不是每帧），控制扰动次数；强度随体型微调
+    // ── 生物游动尾迹（阶段 5-⑪ / ⑪c）：鱼/龟在水中游过留下真实扩散的波 ──
+    // 强度按体型**幂次**缩放（排水量量级），不是近似均匀——小鱼只是细痕，
+    // 大龟才推得出涌浪；半径也随体型变。全部走 CONFIG.natural。
+    const nat = CONFIG.natural ?? {};
+    const swimGap = nat.waveSwimGap ?? 0.6;
     this._swimWakeT = (this._swimWakeT ?? 0) + dt;
-    if (this._swimWakeT >= 0.3 && (CONFIG.natural?.wave ?? true)) {
+    if (swimGap > 0 && this._swimWakeT >= swimGap && (nat.wave ?? true)) {
       this._swimWakeT = 0;
-      for (const f of this.fishes) {
-        if (f.dying) continue;
-        if (this.world.isWater(f.x, f.y)) {
-          this.world.wave.disturb(f.x, f.y, 0.045 + f.size * 0.004, 2);
+      const fk = nat.waveFishStr ?? 0.55;
+      const tk = nat.waveTurtleStr ?? 0.07;
+      const exp = nat.waveSizeExp ?? 2.4;        // 体型指数：越大个体差异越夸张
+      const jitter = nat.waveSizeJitter ?? 0.25; // 同体型个体间的随机摆动幅度
+
+      // 参照体型 = 该物种成年体型中值，用它做归一化，避免"小鱼物种天生吃亏"
+      const fishRef = (CONFIG.fish.minSize + CONFIG.fish.maxSize) / 2;  // = 9.5
+      const turtleRef = CONFIG.turtle.size;                            // = 34
+
+      if (fk > 0) {
+        for (const f of this.fishes) {
+          if (f.dying || !this.world.isWater(f.x, f.y)) continue;
+          // 注意：f.size 已含品种 sizeScale，这里不能再乘一次
+          // 以**当前**体型算（幼鱼小 → 波小；长大 → 波自然变大）
+          const ratio = Math.max(0.25, f.size / fishRef);
+          // 每只鱼一个固定个性因子（0.78~1.22），同尺寸也不整齐
+          const idio = f._waveIdio ?? (f._waveIdio = 1 + (Math.random() * 2 - 1) * jitter);
+          const s = fk * 0.13 * Math.pow(ratio, exp) * idio;
+          // 半径 1~3 随体型：小鱼细痕，大鱼宽波
+          const rad = 1 + Math.round(Math.min(1, ratio * 0.7) * 1.6);
+          this.world.wave.disturb(f.x, f.y, s, rad);
         }
       }
-      for (const t of this.turtles) {
-        if (t.dying || !this.world.isWater(t.x, t.y)) continue;
-        // 只在龟真正移动时起波（趴着晒背不起）
-        const sp = Math.hypot(t.vx ?? 0, t.vy ?? 0);
-        if (sp > 2) this.world.wave.disturb(t.x, t.y, 0.12, 3);
+      if (tk > 0) {
+        for (const t of this.turtles) {
+          if (t.dying || !this.world.isWater(t.x, t.y)) continue;
+          // 只在龟真正移动时起波（趴着晒背不起）
+          const sp = Math.hypot(t.vx ?? 0, t.vy ?? 0);
+          if (sp <= 2) continue;
+          // t.size 已含 sizeScale，幼龟小 → 波小
+          const ratio = Math.max(0.25, t.size / turtleRef);
+          const idio = t._waveIdio ?? (t._waveIdio = 1 + (Math.random() * 2 - 1) * jitter);
+          const s = tk * 2.2 * Math.pow(ratio, exp * 0.8) * idio;
+          const rad = 2 + Math.round(Math.min(1.4, ratio) * 1.5);
+          this.world.wave.disturb(t.x, t.y, s, rad);
+        }
       }
     }
 

@@ -16,6 +16,7 @@
 import { CONFIG } from './config.js';
 import { rand, randInt, dist2, clamp, pick } from './utils.js';
 import { pickTurtleSpecies, turtleBehavior, HABITAT_LABELS } from './species.js';
+import { drawSideTurtle, turtleArt } from './creature-art.js';
 
 const STATE = {
   SWIM: 'swim',
@@ -72,6 +73,11 @@ export class Turtle {
     this.hunger = opts.baby ? 0.55 : rand(0.2, 0.6);
     this.flipperPhase = rand(0, Math.PI * 2);
     this.headBob = rand(0, Math.PI * 2);
+
+    // ── 美术（阶段 5-⑬ 新画法）────────────────────────
+    this.artSeed = opts.artSeed ?? ((Math.random() * 0xffffffff) >>> 0);  // 个体外观种子（存档持久化）
+    this.facing = 0;          // 朝向：1 右 / -1 左（update 里按实际位移推断，0 = 未定）
+    this.pitch = 0;           // 俯仰角（rad，随垂直速度轻微摆动）
 
     // 晒太阳目标点（岸边）
     this.baskTarget = null;
@@ -141,6 +147,7 @@ export class Turtle {
 
   update(dt, foods, cursor, turtles, env = { light: 1, isNight: false }) {
     const T = CONFIG.turtle;
+    const px0 = this.x;          // 记录本帧起点 → 推断朝向（阶段 5-⑬）
     // 成长（年龄/体型/繁殖冷却）
     this._grow(dt);
     // ── 死亡动画优先（阶段 5-⑥）────────────────────
@@ -158,7 +165,7 @@ export class Turtle {
     }
 
     const W = this.world;
-    const inWater = W.isWater(this.x, this.y);
+    const inWater = W.isWater(this.x, this.y);   // 本帧「移动前」是否在水里（仅用于泳姿判断）
     const target = this._nearestFood(foods);
 
     // ── 状态决策 ───────────────────────────────────────
@@ -235,6 +242,9 @@ export class Turtle {
         if (this.stateTime > (env.isNight ? goal * 0.3 : goal)) {
           this.state = STATE.RETURN;
           this.stateTime = 0;
+          // 这次回水是"只换个岸边位置"还是"真的下水泡一会"——进 RETURN 时掷一次骰子。
+          // （陆龟基本不下水，但少数时候会去浅水里泡一泡）
+          this._landOnlyReturn = this.habitat === 'terrestrial' && Math.random() < 0.7;
         } else {
           // 小范围爬动（陆龟爬得快些）
           const spd = T.crawlSpeed * this.behavior.landSpeedScale;
@@ -269,18 +279,27 @@ export class Turtle {
       }
 
       case STATE.RETURN: {
-        // 陆龟"回水"其实只是换个岸边位置继续待着
-        if (this.habitat === 'terrestrial' && Math.random() < 0.7) {
+        // 陆龟"回水"多数只是换个岸边位置继续待着（这次是否下水在进 RETURN 时已掷过骰子）
+        if (this.habitat === 'terrestrial' && this._landOnlyReturn) {
           this._pickBaskTarget();
           this.state = STATE.CLIMB_OUT;
           break;
         }
-        const tx = this.x + Math.cos(this.angle) * 40;
-        const ty = W.marshLineAt(tx) - 60;
+        const tx = clamp(this.x + Math.cos(this.angle) * 40, 20, W.w - 20);
+        // 目标点压在水面以下（水位很浅的窗口也不会指到岸上）
+        const ty = Math.max(W.bankLineAt(tx) + 40, W.marshLineAt(tx) - 60);
         this._moveToward(tx, ty, dt, T.swimSpeed);
-        if (inWater && this.y > W.bankLineAt(this.x) + 30) {
+        // ⚠ 用"移动后"的实时位置判定：
+        //   inWater 是本帧开头（移动前）算的，在岸上时恒为 false，
+        //   旧写法 inWater && y > 岸线+30 会在岸上永久不成立 → 龟锁死在 RETURN 状态。
+        if (W.isWater(this.x, this.y)
+            && this.y > W.bankLineAt(this.x) + this.size * 0.4 + 2) {
           this.state = STATE.SWIM;
+          this.stateTime = 0;
           this.decisionTimer = rand(4, 10) * this.behavior.waterBias;
+          // 入水后顺势向前游一段，别贴着岸线原地打转
+          this.vx = Math.cos(this.angle) * rand(4, 12);
+          this.vy = rand(3, 10);
         }
         break;
       }
@@ -312,16 +331,23 @@ export class Turtle {
     }
 
     // ── 边界硬约束 ─────────────────────────────────────
-    // 水面区域约束（在水里时）
-    if (inWater) {
+    // 关键：不能拿本帧开头的 inWater 判断"现在在水里"——它是移动前的值。
+    // 旧写法在水域外（岸上）把 y 按到 岸线+2，而「入水」的判定线是 岸线+6：
+    // 60fps 下每帧只挪 0.37px，永远跨不过那 4px，于是上过岸的龟再也下不了水。
+    // 现在按状态区分约束方式：
+    //   · swim / seek_food          → 真在水里活动，硬约束进水域
+    //   · climb_out / bask / return → 正在跨越水陆边界，只做池塘兜底，不挡路
+    const waterState = this.state === STATE.SWIM || this.state === STATE.SEEK_FOOD;
+    if (waterState) {
       const c = W.constrainToWater(this.x, this.y, this.size * 0.4);
       this.x = c.x; this.y = c.y;
-    } else if (W.isBank(this.x, this.y)) {
-      this.x = clamp(this.x, this.size, W.w - this.size);
-      this.y = clamp(this.y, 10, Math.max(12, W.bankLineAt(this.x) + 2));
     } else {
-      // 泥沼区：不让乌龟游太深
-      this.y = clamp(this.y, W.bankLineAt(this.x) + 4, W.marshLineAt(this.x) - 4);
+      this.x = clamp(this.x, this.size, W.w - this.size);
+      // 晒背时不许被挤推/光标拽下水；上岸与回水途中可自由穿越岸线
+      const hi = this.state === STATE.BASK
+        ? Math.max(16, W.bankLineAt(this.x) - 6)
+        : Math.max(12, W.marshLineAt(this.x) - 8);
+      this.y = clamp(this.y, 10, hi);
     }
 
     // 水龟不该被卡在岸边：若在水域外的岸上且不是主动上岸状态，拉回水里
@@ -332,6 +358,15 @@ export class Turtle {
       this.y = W.bankLineAt(this.x) + this.size * 0.6 + 8;
       this.state = STATE.SWIM;
     }
+
+    // ── 朝向与俯仰（阶段 5-⑬：侧视立绘不随 angle 整体旋转）──
+    // 位移推断左右（阈值滤抖动）；垂直速度 → 轻微俯仰角（±11°，平滑过渡）
+    const dxf = this.x - px0;
+    if (dxf > 0.02) this.facing = 1;
+    else if (dxf < -0.02) this.facing = -1;
+    else if (!this.facing) this.facing = Math.cos(this.angle) >= 0 ? 1 : -1;
+    const targetPitch = clamp(this.vy / 130, -1, 1) * 0.19;
+    this.pitch += (targetPitch - this.pitch) * Math.min(1, dt * 5);
 
     this.flipperPhase += dt * 2.4;
     this.headBob += dt * 1.6;
@@ -405,10 +440,18 @@ export class Turtle {
     return Math.round(Math.abs(this.flipperPhase) * 3);
   }
 
+  /** 皮肤：品种字段 + 个体种子 → 画法参数（缓存到实例，seed 变了才重算） */
+  _skin() {
+    if (!this._skinP || this._skinSeed !== this.artSeed) {
+      this._skinP = turtleArt(this.species, this.artSeed);
+      this._skinSeed = this.artSeed;
+    }
+    return this._skinP;
+  }
+
   draw(ctx) {
-    const s = this.size;
-    const sp = this.species;
-    const flatScale = sp.flat ? 0.82 : 1;
+    const P = this._skin();
+    const S = this.size * (CONFIG.art?.turtleScale ?? 0.72);
 
     ctx.save();
     // 死亡渐隐（阶段 5-⑥）
@@ -417,159 +460,34 @@ export class Turtle {
       ctx.globalAlpha = clamp(this.dyingTimer / (D * 0.45), 0, 1);
     }
     ctx.translate(this.x, this.y);
-    ctx.rotate(this.angle);
 
-    const paddling = !this.dying
-      && (this.state === STATE.SWIM || this.state === STATE.SEEK_FOOD);
-    const legSwing = paddling
-      ? Math.sin(this.flipperPhase) * 0.5
-      : Math.sin(this.flipperPhase * 0.5) * 0.22;
-
-    // ── 四条腿 ─────────────────────────────────────────
-    ctx.fillStyle = sp.limb;
-    const legPos = [
-      [s * 0.32, -s * 0.42], [s * 0.32, s * 0.42],
-      [-s * 0.3, -s * 0.42], [-s * 0.3, s * 0.42],
-    ];
-    legPos.forEach(([lx, ly], i) => {
-      const sw = i % 2 === 0 ? legSwing : -legSwing;
-      ctx.beginPath();
-      ctx.ellipse(lx + sw * s * 0.28, ly, s * 0.16, s * 0.11, sw * 0.4, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    // ── 头 ─────────────────────────────────────────────
-    const headExt = this.state === STATE.BASK ? 0 : 0.42;
-    const bob = Math.sin(this.headBob) * s * 0.03;
-    const hx = s * (0.45 + headExt), hy = bob;
-    ctx.fillStyle = sp.head;
-    ctx.beginPath();
-    ctx.ellipse(hx, hy, s * 0.2, s * 0.16, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 头部标记（如巴西龟的红耳斑）
-    if (sp.markColor) {
-      ctx.fillStyle = sp.markColor;
-      ctx.beginPath();
-      ctx.ellipse(hx - s * 0.02, hy - s * 0.09, s * 0.07, s * 0.035, -0.3, 0, Math.PI * 2);
-      ctx.fill();
+    if (this.dying) {
+      // 翻肚上浮：垂直镜像（肚朝天）+ 慢速摇摆
+      ctx.scale(this.facing || 1, -1);
+      ctx.rotate(Math.sin(this.flipperPhase * 0.8) * 0.05);
+      drawSideTurtle(ctx, S, this.flipperPhase * 0.3, { ...P, shadow: false });
+    } else {
+      // 侧视立绘：水平镜像 + 轻微俯仰，不随 angle 整体旋转（阶段 5-⑬）
+      ctx.scale(this.facing || 1, 1);
+      ctx.rotate(this.pitch ?? 0);
+      // 水里划水快、岸上爬行慢（legAmp 缩小摆幅）
+      const paddling = this.state === STATE.SWIM || this.state === STATE.SEEK_FOOD;
+      drawSideTurtle(ctx, S, this.flipperPhase, { ...P, legAmp: paddling ? 1 : 0.28 });
     }
-    // 眼睛
-    ctx.fillStyle = '#111';
-    ctx.beginPath();
-    ctx.arc(hx + s * 0.09, hy - s * 0.06, Math.max(1.2, s * 0.035), 0, Math.PI * 2);
-    ctx.fill();
-
-    // ── 龟壳 ───────────────────────────────────────────
-    const g = ctx.createRadialGradient(-s * 0.08, -s * 0.08, s * 0.1, 0, 0, s * 0.62);
-    g.addColorStop(0, this._lighten(this.shellColor, 34));
-    g.addColorStop(1, this.shellColor);
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, s * 0.56, s * 0.46 * flatScale, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 壳纹（按品种）
-    this._drawShellPattern(ctx, s, sp, flatScale);
-
-    // 壳高光
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
-    ctx.beginPath();
-    ctx.ellipse(-s * 0.14, -s * 0.14, s * 0.18, s * 0.11, -0.4, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 尾
-    ctx.fillStyle = sp.limb;
-    ctx.beginPath();
-    ctx.moveTo(-s * 0.54, 0);
-    ctx.lineTo(-s * 0.7, -s * 0.07);
-    ctx.lineTo(-s * 0.7, s * 0.07);
-    ctx.closePath();
-    ctx.fill();
-
     ctx.restore();
 
-    // 晒背标记（岸边时头顶小太阳）
+    // 晒背标记（岸边时头顶小太阳）—— 位置跟随朝向与新画法头位
     if (this.state === STATE.BASK && !this.dying) {
       ctx.save();
       ctx.globalAlpha = 0.5 + 0.2 * Math.sin(this.headBob * 2);
       ctx.fillStyle = '#ffe9a8';
       ctx.beginPath();
-      ctx.arc(this.x + this.size * 0.55, this.y - this.size * 0.6, 3.2, 0, Math.PI * 2);
+      ctx.arc(this.x + (this.facing || 1) * S * 0.95, this.y - S * 0.66, 3.2, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
     }
   }
 
-  /** 按品种绘制壳纹 */
-  _drawShellPattern(ctx, s, sp, flatScale) {
-    const ry = s * 0.46 * flatScale;
-    ctx.save();
-    switch (sp.pattern) {
-      case 'rings': {
-        ctx.strokeStyle = 'rgba(0,0,0,0.28)';
-        ctx.lineWidth = Math.max(1, s * 0.028);
-        ctx.beginPath();
-        ctx.ellipse(0, 0, s * 0.42, ry * 0.72, 0, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.ellipse(0, 0, s * 0.24, ry * 0.41, 0, 0, Math.PI * 2);
-        ctx.stroke();
-        for (let i = 0; i < 6; i++) {
-          const a = (i / 6) * Math.PI * 2;
-          ctx.beginPath();
-          ctx.moveTo(Math.cos(a) * s * 0.24, Math.sin(a) * ry * 0.41);
-          ctx.lineTo(Math.cos(a) * s * 0.42, Math.sin(a) * ry * 0.72);
-          ctx.stroke();
-        }
-        break;
-      }
-      case 'stripes': {
-        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-        ctx.lineWidth = Math.max(1, s * 0.03);
-        for (let i = -2; i <= 2; i++) {
-          ctx.beginPath();
-          ctx.ellipse(0, 0, s * 0.16, ry * (0.9 - Math.abs(i) * 0.18), i * 0.5, 0, Math.PI * 2);
-          ctx.stroke();
-        }
-        break;
-      }
-      case 'lines': {
-        ctx.strokeStyle = sp.markColor || 'rgba(0,0,0,0.3)';
-        ctx.globalAlpha = 0.55;
-        ctx.lineWidth = Math.max(1, s * 0.022);
-        for (let i = -1; i <= 1; i++) {
-          ctx.beginPath();
-          ctx.moveTo(-s * 0.5, i * ry * 0.42);
-          ctx.lineTo(s * 0.5, i * ry * 0.42);
-          ctx.stroke();
-        }
-        ctx.beginPath();
-        ctx.moveTo(0, -ry * 0.8);
-        ctx.lineTo(0, ry * 0.8);
-        ctx.stroke();
-        break;
-      }
-      case 'smooth':
-      default:
-        // 无纹路，仅边缘暗化
-        ctx.strokeStyle = 'rgba(0,0,0,0.18)';
-        ctx.lineWidth = Math.max(1, s * 0.03);
-        ctx.beginPath();
-        ctx.ellipse(0, 0, s * 0.52, ry * 0.9, 0, 0, Math.PI * 2);
-        ctx.stroke();
-        break;
-    }
-    ctx.restore();
-  }
-
-  _lighten(hex, amt) {
-    const n = parseInt(hex.slice(1), 16);
-    const r = clamp((n >> 16) + amt, 0, 255);
-    const g = clamp(((n >> 8) & 0xff) + amt, 0, 255);
-    const b = clamp((n & 0xff) + amt, 0, 255);
-    return `rgb(${r},${g},${b})`;
-  }
 }
 
 // ══════════════════════════════════════════════════════════

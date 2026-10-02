@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>阶段 5-⑬ 新画法 · 全品种图鉴验收</title>
+<style>
+  body { margin: 0; padding: 14px; background: #101d24; color: #cfe8f0;
+         font-family: "Microsoft YaHei", ui-sans-serif, sans-serif; }
+  h1 { font-size: 17px; margin: 0 0 6px; }
+  #report { font: 13px/1.6 Consolas, monospace; background: rgba(255,255,255,0.06);
+            border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; white-space: pre-wrap; }
+  canvas { display: block; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>🐢 阶段 5-⑬ 新画法 · 全品种图鉴（每格：左=个体A 右=个体B，验证个体差异）</h1>
+<div id="report">运行中…</div>
+<canvas id="gallery" width="1500" height="1290"></canvas>
+
+<script type="module">
+import { TURTLE_SPECIES, FISH_SPECIES } from './src/species.js';
+import {
+  drawSideTurtle, drawTopTurtle, drawSideFish, drawTopFish,
+  turtleArt, fishArt,
+} from './src/creature-art.js';
+
+const cv = document.getElementById('gallery');
+const ctx = cv.getContext('2d');
+const log = [];
+let pass = 0, fail = 0;
+const ok = (c, m) => { c ? pass++ : fail++; log.push((c ? '✅ ' : '❌ ') + m); };
+
+// ── 单元格绘制：species × 视图 × 两个个体 ──────────────
+const draws = { fail: 0 };
+function cell(x, y, w, h, sp, seedA, seedB, kind, view) {
+  ctx.save();
+  ctx.translate(x, y);
+  // 格子底
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  ctx.fillRect(0, 0, w, h);
+  try {
+    const P0 = kind === 'turtle' ? turtleArt(sp, seedA) : fishArt(sp, seedA);
+    const P1 = kind === 'turtle' ? turtleArt(sp, seedB) : fishArt(sp, seedB);
+    const draw = kind === 'turtle'
+      ? (view === 'side' ? drawSideTurtle : drawTopTurtle)
+      : (view === 'side' ? drawSideFish : drawTopFish);
+    const S = view === 'side'
+      ? (kind === 'turtle' ? h * 0.30 : h * 0.34)
+      : (kind === 'turtle' ? h * 0.34 : h * 0.40);
+    // 个体 A（左）
+    ctx.save();
+    ctx.translate(w * 0.30, h * 0.56);
+    draw(ctx, S, 0.9, P0);
+    ctx.restore();
+    // 个体 B（右）
+    ctx.save();
+    ctx.translate(w * 0.72, h * 0.58);
+    draw(ctx, S * 0.92, 2.2, P1);
+    ctx.restore();
+  } catch (e) { draws.fail++; log.push('   ↳ 绘制异常 ' + sp.id + ': ' + e.message); }
+  // 品种名
+  ctx.fillStyle = '#9fc4cf';
+  ctx.font = '12px "Microsoft YaHei"';
+  ctx.fillText(sp.label, 6, h - 7);
+  ctx.restore();
+}
+
+// ── 版面 ──────────────────────────────────────────────
+const turtles = Object.values(TURTLE_SPECIES);
+const fishes = Object.values(FISH_SPECIES);
+const CW = 214, CH = 150;
+let y = 0;
+
+function band(title) {
+  ctx.fillStyle = '#7fd4e8';
+  ctx.font = 'bold 14px "Microsoft YaHei"';
+  ctx.fillText(title, 4, y + 16);
+  y += 26;
+}
+
+band('龟 · 侧视（13 种 × 2 个体）');
+turtles.forEach((sp, i) => {
+  const col = i % 7, row = (i / 7) | 0;
+  cell(col * CW, y + row * CH, CW, CH, sp, 11 + i * 97, 4600 + i * 313, 'turtle', 'side');
+});
+y += 2 * CH + 6;
+
+band('龟 · 俯视（背甲纹样是品种识别特征）');
+turtles.forEach((sp, i) => {
+  const col = i % 7, row = (i / 7) | 0;
+  cell(col * CW, y + row * CH, CW, CH, sp, 23 + i * 71, 8800 + i * 197, 'turtle', 'top');
+});
+y += 2 * CH + 6;
+
+band('鱼 · 侧视（6 种 × 2 个体；金鱼长尾 / 锦鲤斑纹走品种参数）');
+fishes.forEach((sp, i) => {
+  cell(i * CW, y, CW, CH * 0.9, sp, 31 + i * 53, 6100 + i * 271, 'fish', 'side');
+});
+y += CH * 0.9 + 6;
+
+band('鱼 · 俯视');
+fishes.forEach((sp, i) => {
+  cell(i * CW, y, CW, CH * 0.8, sp, 41 + i * 37, 7200 + i * 151, 'fish', 'top');
+});
+
+// ── 断言 ──────────────────────────────────────────────
+ok(draws.fail === 0, `19 品种 × 俯/侧 × 2 个体 全部渲染无异常（异常 ${draws.fail}）`);
+
+// 个体差异：同种不同 seed → 壳/体色不同
+let diff = 0, same = 0;
+for (const sp of turtles) {
+  const a = turtleArt(sp, 111), b = turtleArt(sp, 222);
+  if (a.C.shell !== b.C.shell) diff++;
+}
+for (const sp of fishes) {
+  const a = fishArt(sp, 111), b = fishArt(sp, 222);
+  if (a.C.body !== b.C.body) diff++;
+}
+ok(diff === 19, `个体差异：19 品种里 ${diff} 个不同 seed 产出不同体色（应 19）`);
+
+// 同 seed 可复现
+const r1 = turtleArt(turtles[0], 42), r2 = turtleArt(turtles[0], 42);
+ok(r1.C.shell === r2.C.shell && r1.so === r2.so, '同 seed 可复现（存档还原同一只长得一样）');
+
+// 种间特征字段齐全
+const missing = turtles.filter((sp) => !sp.artMark || !sp.artPattern).map((sp) => sp.id);
+ok(missing.length === 0, `13 龟种 artMark/artPattern 齐全${missing.length ? '（缺：' + missing + '）' : ''}`);
+
+// 颜色合法性（hex / rgb / hsl / rgba）
+const colorOk = (c) => /^#[0-9a-f]{6}$/.test(c) || /^(rgb|hsl)a?\(/.test(c);
+let badColor = 0;
+for (const sp of turtles) {
+  const P = turtleArt(sp, 7);
+  for (const k of ['shell', 'shellHi', 'limb', 'head', 'yellow', 'line']) {
+    if (!colorOk(P.C[k])) badColor++;
+  }
+}
+ok(badColor === 0, `色值全部合法（非法 ${badColor}）`);
+
+// 自定义品种兜底
+const custom = turtleArt({ id: 'customX', label: '自定义', shell: '#345678', limb: '#234567', head: '#456789', pattern: 'rings', markColor: '#ffcc00' }, 5);
+ok(!!custom.C.shell && !!custom.mark && !!custom.pat, '自定义品种（无美术字段）兜底可用');
+
+// 报告
+const rep = document.getElementById('report');
+rep.textContent = log.join('\n') + `\n\n结果：${pass} 过 / ${fail} 败`;
+rep.id = fail === 0 ? `done:${pass}:${fail}` : `report:${pass}:${fail}`;
+</script>
+</body>
+</html>

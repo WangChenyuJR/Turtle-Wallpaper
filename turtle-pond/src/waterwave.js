@@ -36,9 +36,16 @@ export class WaterWaveField {
    * @param {number} w 画布宽（CSS px）
    * @param {number} h 画布高（CSS px）
    * @param {number} [cell] 每格像素
+   * @param {object} [opts] 手感参数（来自 CONFIG.natural）
+   * @param {number} [opts.damping=0.985] 阻尼，越小波越快平息、扩散越近
+   * @param {number} [opts.ambientGap=0.35] 环境微扰间隔（秒）；≤0 关闭
+   * @param {number} [opts.ambientStr=0.09] 环境微扰基准强度
    */
-  constructor(w, h, cell = CELL) {
+  constructor(w, h, cell = CELL, opts = {}) {
     this.cell = cell;
+    this.damping = opts.damping ?? DAMPING;
+    this.ambientGap = opts.ambientGap ?? 0.35;
+    this.ambientStr = opts.ambientStr ?? 0.09;
     this.resize(w, h);
     // 环境微扰计时（无操作时水面也不该是完全死水）
     this._ambientT = 0;
@@ -120,7 +127,7 @@ export class WaterWaveField {
         for (let x = 1; x < cols - 1; x++) {
           const i = row + x;
           const lap = cur[i - 1] + cur[i + 1] + cur[i - cols] + cur[i + cols] - 4 * cur[i];
-          let v = (2 * cur[i] - prev[i] + R * lap) * DAMPING;
+          let v = (2 * cur[i] - prev[i] + R * lap) * this.damping;
           // 数值安全钳制，防止极端扰动炸开
           if (v > 4) v = 4; else if (v < -4) v = -4;
           next[i] = v;
@@ -132,14 +139,15 @@ export class WaterWaveField {
     }
 
     // 环境微扰：偶尔在随机位置落一个极轻的扰动，让静止水面也有呼吸感
+    // ambientGap ≤ 0 表示关闭（水面完全平静，只有主动扰动才起波）
     this._ambientT += dt;
-    if (opts.ambient !== false && this._ambientT > 0.35) {
+    if (opts.ambient !== false && this.ambientGap > 0 && this._ambientT > this.ambientGap) {
       this._ambientT = 0;
       const rx = Math.random() * this.w;
       const ry = Math.random() * this.h;
       // 只有水面区域才扰动（由调用方 world 决定；这里用一个回调）
       if (this.ambientFilter ? this.ambientFilter(rx, ry) : true) {
-        this.disturb(rx, ry, 0.09 + Math.random() * 0.10, 3);
+        this.disturb(rx, ry, this.ambientStr * (0.7 + Math.random() * 0.6), 3);
       }
     }
   }

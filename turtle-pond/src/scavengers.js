@@ -10,6 +10,7 @@
  */
 
 import { CONFIG } from './config.js';
+import { organicPath } from './creature-art.js';
 import { rand, randInt, dist2, clamp } from './utils.js';
 
 // ══════════════════════════════════════════════════════════
@@ -175,33 +176,47 @@ export class Snail {
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.scale(this.dir, 1);
-    // 身体（腹足）
-    ctx.fillStyle = '#8a7f66';
-    ctx.beginPath();
-    ctx.ellipse(s * 0.2, 0, s * 0.72, s * 0.3, 0, 0, Math.PI * 2);
+    // 足（腹足：有机轮廓 + 墨线，阶段 5-⑬ 统一画法）
+    ctx.save();
+    ctx.translate(s * 0.2, 0);
+    organicPath(ctx, s * 0.72, s * 0.30, 23, { low: 0.05, high: 0.015 });
+    ctx.fillStyle = '#9a8f74';
     ctx.fill();
-    // 壳（螺旋）
+    ctx.strokeStyle = 'rgba(70,56,32,0.5)';
+    ctx.lineWidth = Math.max(0.8, s * 0.028);
+    ctx.stroke();
+    ctx.restore();
+    // 壳（螺旋：有机外缘 + 径向渐变 + 墨线）
     const wobble = Math.sin(this.phase * 2) * 0.06;
-    const g = ctx.createRadialGradient(-s * 0.15, -s * 0.4, s * 0.1, 0, -s * 0.35, s * 0.62);
-    g.addColorStop(0, `hsl(${this.shellHue}, 32%, 62%)`);
+    ctx.save();
+    ctx.translate(0, -s * 0.3);
+    organicPath(ctx, s * 0.52, s * 0.48 * (1 + wobble), 31 + (Math.round(this.shellHue) % 16), {
+      low: 0.035, high: 0.012,
+    });
+    const g = ctx.createRadialGradient(-s * 0.15, -s * 0.12, s * 0.1, 0, 0, s * 0.62);
+    g.addColorStop(0, `hsl(${this.shellHue}, 32%, 64%)`);
     g.addColorStop(1, `hsl(${this.shellHue}, 38%, 38%)`);
     ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.ellipse(0, -s * 0.3, s * 0.52, s * 0.48 * (1 + wobble), 0, 0, Math.PI * 2);
     ctx.fill();
+    ctx.strokeStyle = 'rgba(70,56,32,0.6)';
+    ctx.lineWidth = Math.max(0.9, s * 0.034);
+    ctx.stroke();
     // 螺纹
     ctx.strokeStyle = 'rgba(60,45,25,0.5)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.ellipse(0, -s * 0.3, s * 0.32, s * 0.28, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, s * 0.32, s * 0.28, 0, 0, Math.PI * 2);
     ctx.stroke();
+    ctx.restore();
     // 触角
     ctx.strokeStyle = '#8a7f66';
+    ctx.lineWidth = Math.max(0.8, s * 0.045);
+    ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(s * 0.6, -s * 0.1);
-    ctx.lineTo(s * 0.95, -s * 0.42);
+    ctx.quadraticCurveTo(s * 0.8, -s * 0.3, s * 0.95, -s * 0.42);
     ctx.moveTo(s * 0.62, -s * 0.02);
-    ctx.lineTo(s * 1.0, -s * 0.2);
+    ctx.quadraticCurveTo(s * 0.84, -s * 0.1, s * 1.0, -s * 0.2);
     ctx.stroke();
     ctx.restore();
   }
