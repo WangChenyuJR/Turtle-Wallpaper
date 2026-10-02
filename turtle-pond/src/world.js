@@ -46,15 +46,17 @@ export class World {
     this.w = width; this.h = height;
     this.resize(width, height);
 
-    // 真实波动方程水场（阶段 5-⑪）：逐帧求解 2D 波动方程，波与波真实干涉
+    // 一维水面波场（阶段 8-④）：逐帧求解 1D 波动方程。
+    // 侧视剖面下水只有"沿 x 的高度"这一个自由度 —— 波只能水平传播，
+    // 物理上不可能出现"以扰动点为中心的同心环"（那是俯视水面的现象）。
     const nat = CONFIG.natural ?? {};
-    this.wave = new WaterWaveField(width, height, nat.waveCell ?? 7, {
+    this.wave = new WaterWaveField(width, height, nat.waveCell ?? 4, {
       damping: nat.waveDamping ?? 0.985,
       ambientGap: nat.waveAmbientGap ?? 0.35,
       ambientStr: nat.waveAmbientStr ?? 0.09,
     });
-    // 只有水面区域才允许环境微扰（岸上/池底不波动）
-    this.wave.ambientFilter = (x, y) => this.isWater(x, y);
+    // 只有水面列才允许环境微扰（岸上不波动）
+    this.wave.ambientFilter = (x) => this.isWaterColumn(x);
 
     this._buildTerrain();
     this._buildRipples();
@@ -670,8 +672,10 @@ export class World {
   }
 
   _buildRipples() {
-    this.ripples = [];    // 仅保留"入水溅射"这类短促视觉圈（非主水面波动）
+    this.ripples = [];    // 入水溅射（阶段 8-④ 起是"水花 + 短横痕"，不再是同心环）
     this.footprints = []; // 岸上爬行脚印（阶段 5-⑭）
+    this.wakeTrails = []; // 拖尾痕迹（阶段 8-④）：鼠标划过 / 生物游动身后留下的痕
+    this.stirBits = [];   // 水下搅动粒子（阶段 8-④）：鼠标在深水推水翻起的泥沙与气泡
   }
 
   // ════════════════════════════════════════════════════════
@@ -754,16 +758,218 @@ export class World {
   }
 
   /**
-   * 鼠标尾迹 —— 沿移动线段连续扰动波场（真实连锁波纹）
+   * 鼠标尾迹 —— 沿移动线段连续扰动波场，并留下一条拖尾痕迹。
+   *
+   * 阶段 8-④ 起**按深度分层**：
+   *   · 光标在水线附近（±`wakeBand`）→ 这是"在水面上拖拽"：真的扰动水面 + 留拖尾痕；
+   *   · 光标在更深处 → 交给 `addUnderwaterStir`（翻泥沙气泡，几乎不碰水面）。
+   * 旧版对水里任何位置都无条件扰动，于是"池底游的鱼也在水面荡出环"。
    */
   addWake(x0, y0, x1, y1, speed = 0) {
     if (!this.wave) return;
     const nat = CONFIG.natural ?? {};
+    if (nat.wake === false) return;
     const k = nat.waveCursorStr ?? 0.55;
     const s = clamp(k * (0.4 + speed / 1400), k * 0.4, k * 1.6);
     const rad = nat.waveCursorRadius ?? 1;
     if (!this.isWater(x1, y1)) return;
+
+    // 离水线太远 → 算水下，改走搅动（不在水面留痕）
+    const band = nat.wakeBand ?? 34;
+    if (Math.abs(y1 - this.surfaceAt(x1)) > band) {
+      this.addUnderwaterStir(x1, y1, s * 1.3);
+      return;
+    }
+
     this.wave.disturbLine(x0, y0, x1, y1, s, rad);
+    this._pushWake(x0, x1, s, false);
+  }
+
+  /**
+   * 拖尾痕迹入列 —— 一条 [x0, x1] 的水平痕，随时间**往后拉长、变淡**。
+   * 拖拽感就来自这里：痕迹留在身后，而不是从一点向四周扩散。
+   * @param {number} x0,x1 痕迹两端（像素）
+   * @param {number} str 初始强度
+   * @param {boolean} creature 生物留下的（更宽更缓）；false = 鼠标
+   * @param {number} [depth] 离水线深度（px，>0 在水面下）；越深越淡
+   */
+  _pushWake(x0, x1, str, creature, depth = 0) {
+    const nat = CONFIG.natural ?? {};
+    if (nat.wake === false) return;
+    let a = x0, b = x1;
+    if (b < a) { const t = a; a = b; b = t; }
+    if (b - a < 1.5) return;                       // 太短不留痕
+    const maxLife = creature ? (nat.wakeLife ?? 2.4) : (nat.wakeLifeCursor ?? 1.5);
+    this.wakeTrails.push({
+      x0: a, x1: b,
+      // 移动方向：痕迹向"身后"拉长（正在向右走 → 左端继续向左长）
+      dir: x1 >= x0 ? 1 : -1,
+      str, depth, creature,
+      life: maxLife, maxLife,
+    });
+    const cap = nat.wakeCap ?? 90;
+    if (this.wakeTrails.length > cap) {
+      this.wakeTrails.splice(0, this.wakeTrails.length - cap);
+    }
+  }
+
+  _updateWakes(dt) {
+    if (!this.wakeTrails.length) return;
+    const grow = CONFIG.natural?.wakeGrow ?? 11;
+    for (let i = this.wakeTrails.length - 1; i >= 0; i--) {
+      const w = this.wakeTrails[i];
+      w.life -= dt;
+      if (w.life <= 0) { this.wakeTrails.splice(i, 1); continue; }
+      const d = grow * dt;
+      if (w.dir > 0) w.x0 -= d; else w.x1 += d;    // 向后拉长
+      w.str *= 0.995;
+    }
+  }
+
+  /**
+   * 水下搅动（阶段 8-④ 新增交互）—— 鼠标在深水推水：翻起泥沙与气泡，
+   * 水面只被"轻轻拱一下"（真实搅动多少会带一点水面扰动，但绝不成环）。
+   * 粒子放独立的 `stirBits`，不去污染常驻的 bubbles/silt 装饰。
+   */
+  addUnderwaterStir(x, y, strength = 1) {
+    const nat = CONFIG.natural ?? {};
+    if (nat.wake === false || nat.underwaterStir === false) return;
+    if (!this.isWater(x, y)) return;
+    const k = (nat.stirStrength ?? 1) * clamp(strength, 0.2, 2);
+
+    const bn = 1 + Math.round(k * 2);
+    for (let i = 0; i < bn; i++) {
+      const life = rand(0.9, 1.8);
+      this.stirBits.push({
+        kind: 'bubble',
+        x: x + rand(-8, 8), y: y + rand(-5, 5),
+        vx: rand(-16, 16), vy: -rand(18, 46) * (0.6 + k * 0.5),
+        r: rand(0.9, 2.6), life, maxLife: life, seed: rand(0, 6.28),
+      });
+    }
+    const sn = 2 + Math.round(k * 3);
+    for (let i = 0; i < sn; i++) {
+      const life = rand(0.7, 1.5);
+      this.stirBits.push({
+        kind: 'silt',
+        x: x + rand(-14, 14), y: y + rand(-4, 14),
+        vx: rand(-26, 26), vy: -rand(6, 20),
+        r: rand(0.7, 2.2), life, maxLife: life, seed: rand(0, 6.28),
+      });
+    }
+    const cap = 260;
+    if (this.stirBits.length > cap) {
+      this.stirBits.splice(0, this.stirBits.length - cap);
+    }
+
+    // 水面影响极弱（指数随深度衰减）
+    if (this.wave) {
+      const d = Math.max(0, this.surfaceAt(x) - y);
+      this.wave.disturb(x, 0, k * 0.06 * Math.exp(-d / 90), 3);
+    }
+  }
+
+  _updateStirBits(dt) {
+    if (!this.stirBits.length) return;
+    for (let i = this.stirBits.length - 1; i >= 0; i--) {
+      const p = this.stirBits[i];
+      p.life -= dt;
+      if (p.life <= 0) { this.stirBits.splice(i, 1); continue; }
+      // 气泡持续上浮并左右飘；泥沙先被推起、再受重力沉回去
+      if (p.kind === 'bubble') {
+        p.vy -= 26 * dt;
+        p.vx += Math.sin(p.seed + p.life * 6) * 8 * dt;
+      } else {
+        p.vy += 46 * dt;
+      }
+      p.vx *= 0.97; p.vy *= 0.985;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      // 别钻出水线，也别穿过池底
+      const srf = this.surfaceAt(p.x) + 1;
+      if (p.y < srf) p.y = srf;
+      const flr = this.groundYAt(p.x) - 1;
+      if (p.y > flr) { p.y = flr; p.vy *= -0.25; }
+    }
+  }
+
+  _drawStirBits(ctx) {
+    if (!this.stirBits.length) return;
+    ctx.save();
+    this._waterPath(ctx);
+    ctx.clip();
+    for (const p of this.stirBits) {
+      const a = (p.life / p.maxLife) ** 2;
+      if (a <= 0.02) continue;
+      if (p.kind === 'bubble') {
+        ctx.globalAlpha = a * 0.72;
+        ctx.strokeStyle = '#eaf9ff';
+        ctx.lineWidth = Math.max(0.7, p.r * 0.4);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = a * 0.5;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(p.x - p.r * 0.3, p.y - p.r * 0.32, Math.max(0.4, p.r * 0.26), 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.globalAlpha = a * 0.5;
+        ctx.fillStyle = '#b9a276';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  /**
+   * 拖尾痕迹绘制 —— 贴着水线的一条细亮痕，两端透明、整体随时间消失。
+   * 这就是"拖拽感"的来源：痕迹**留在身后**，而不是从一点向外扩。
+   */
+  _drawWakeTrails(ctx) {
+    if (!this.wakeTrails.length) return;
+    const amp = CONFIG.natural?.waveAmp ?? 6;
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const w of this.wakeTrails) {
+      const t = w.life / w.maxLife;
+      const a = t * t * (w.creature ? 0.42 : 0.62)
+        * clamp(1 - Math.abs(w.depth) / 40, 0, 1);
+      if (a <= 0.012) continue;
+      const x0 = Math.max(0, w.x0), x1 = Math.min(this.w, w.x1);
+      if (x1 - x0 < 2) continue;
+      const cx = (x0 + x1) / 2;
+      if (!this.isWaterColumn(cx)) continue;
+
+      // 横向渐变：中部最亮 → 两端透明（"拉长变淡"的观感）
+      const g = ctx.createLinearGradient(x0, 0, x1, 0);
+      g.addColorStop(0, 'rgba(226,246,252,0)');
+      g.addColorStop(0.45, `rgba(240,252,255,${a.toFixed(3)})`);
+      g.addColorStop(1, 'rgba(226,246,252,0)');
+      ctx.strokeStyle = g;
+      ctx.lineWidth = (w.creature ? 1.5 : 2.1) + w.str * 1.4;
+      ctx.beginPath();
+      for (let x = x0; x <= x1; x += 6) {
+        const y = this.surfaceAt(x) + 1.4 + this.wave.heightAt(x) * amp * 0.5;
+        x === x0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // 痕迹末端几粒更亮的泡沫点（"刚被推开"的证据）
+      ctx.globalAlpha = a * 0.9;
+      ctx.fillStyle = '#ffffff';
+      for (let k = 1; k <= 3; k++) {
+        const px = w.dir > 0 ? x1 - (k - 1) * 7 : x0 + (k - 1) * 7;
+        if (px < x0 || px > x1) continue;
+        ctx.beginPath();
+        ctx.arc(px, this.surfaceAt(px) + 1, 1.5 - k * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
   }
 
   update(dt) {
@@ -775,6 +981,8 @@ export class World {
     }
     if (this.wave) this.wave.update(dt);
     this._updateFootprints(dt);
+    this._updateWakes(dt);       // 拖尾痕迹（阶段 8-④）
+    this._updateStirBits(dt);    // 水下搅动粒子（阶段 8-④）
     for (const b of this.bubbles) b.phase += b.speed * dt;
     for (const s of this.silt) s.phase += s.speed * dt;
   }
@@ -823,12 +1031,14 @@ export class World {
     this._ensureTextures();
     this._drawEarth(ctx, time);        // 剖面土体（岸 + 池底，最底层）
     this._drawWater(ctx, time);        // 水体（水色分层 + 流动纹理 + 光柱）
-    this._drawWaveSurface(ctx, time);  // 真实波场折射明暗
+    this._drawWaveSurface(ctx, time);  // 一维水面波场的起伏明暗（阶段 8-④）
     this._drawBed(ctx, time);          // 池底淤泥 / 沉积 / 气泡
+    this._drawStirBits(ctx);           // 水下搅动粒子（阶段 8-④）
     this._drawBank(ctx, time);         // 岸顶草皮 / 沙 / 石
     this._drawFootprints(ctx);
-    this._drawSurfaceSheet(ctx, time); // 水面"薄层"（俯角感）
-    this._drawRipples(ctx);
+    this._drawSurfaceSheet(ctx, time); // 水面"薄层"
+    this._drawWakeTrails(ctx);         // 拖尾痕迹（阶段 8-④）
+    this._drawRipples(ctx);            // 入水溅射（水花 + 短横痕）
   }
 
   /** 剖面土体：地表曲线以下全是"切开的土"，越深越暗 */
@@ -879,58 +1089,68 @@ export class World {
   }
 
   /**
-   * 真实波场渲染 —— 把高度梯度当水面斜率做折射着色
-   * 低分辨率 offscreen 上用 ImageData 直接写像素，最后一次性放大贴回。
+   * 一维水面波场渲染（阶段 8-④）
+   *
+   * 侧视下"水面"就是一条沿 x 起伏的线，所以渲染方式也跟着换了：
+   *   · 沿 x 逐段取波场高度 h(x)，把水线画成 `surfaceAt(x) + h(x)·amp` 的起伏曲线；
+   *   · 每段的亮度与线宽按**水面斜率**变化（迎光坡亮、背光坡暗）→ 水面有立体感、在动；
+   *   · 波谷侧再压一条青暗带，让水面显出"厚度"。
+   * 相比旧的 2D 版本：不再需要离屏 ImageData 与逐块梯度采样，
+   * 每帧只画 ~240 段线（旧版 42k 格像素），也不可能有同心环。
    */
   _drawWaveSurface(ctx, time) {
     const N = CONFIG.natural || {};
     if (N.enabled === false || N.waveSurface === false) return;
-    if (!this.wave || CONFIG.natural?.wave === false) return;
+    if (!this.wave || N.wave === false) return;
+    if (this.waterBottom - this.waterTop <= 0) return;
 
-    const top = this.waterTop;
-    const bot = this.waterBottom;
-    const wh = bot - top;
-    if (wh <= 0) return;
-
-    const block = CONFIG.natural?.waveBlock ?? 6;
-    const ow = Math.max(2, Math.ceil(this.w / block));
-    const oh = Math.max(2, Math.ceil(wh / block));
-    if (!this._waveCv || this._waveCv.width !== ow || this._waveCv.height !== oh) {
-      this._waveCv = document.createElement('canvas');
-      this._waveCv.width = ow;
-      this._waveCv.height = oh;
-      this._waveCtx = this._waveCv.getContext('2d');
-      this._waveImg = this._waveCtx.createImageData(ow, oh);
-    }
-
-    const data = this._waveImg.data;
-    const lightDirX = -0.55, lightDirY = -0.83;
-    let p = 0;
-    for (let py = 0; py < oh; py++) {
-      const sy = top + (py + 0.5) * block;
-      for (let px = 0; px < ow; px++) {
-        const s = this.wave.sample((px + 0.5) * block, sy);
-        const dot = s.gx * lightDirX + s.gy * lightDirY;
-        const v = dot * 2.1 + s.h * 0.45;
-        const a = Math.abs(v) * 127;
-        if (v > 0) {
-          data[p] = 228; data[p + 1] = 248; data[p + 2] = 255;
-          data[p + 3] = a > 255 ? 255 : a;
-        } else {
-          data[p] = 10; data[p + 1] = 42; data[p + 2] = 54;
-          const a2 = a * 0.85;
-          data[p + 3] = a2 > 255 ? 255 : a2;
-        }
-        p += 4;
-      }
-    }
-    this._waveCtx.putImageData(this._waveImg, 0, 0);
+    const amp = N.waveAmp ?? 6;
+    const seg = Math.max(4, this.wave.cell * 2);
 
     ctx.save();
-    this._waterPath(ctx);
+    // 裁剪：允许波动略高于水线，但绝不允许画到岸上去
+    const head = amp * 1.6;
+    ctx.beginPath();
+    ctx.moveTo(0, this.surfaceAt(0) - head);
+    for (let x = 0; x <= this.w; x += 8) ctx.lineTo(x, this.surfaceAt(x) - head);
+    ctx.lineTo(this.w, this.waterBottom);
+    ctx.lineTo(0, this.waterBottom);
+    ctx.closePath();
     ctx.clip();
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(this._waveCv, 0, top, this.w, wh);
+
+    ctx.lineCap = 'round';
+    for (let x = 0; x < this.w; x += seg) {
+      const x2 = Math.min(this.w, x + seg);
+      const mx = (x + x2) * 0.5;
+      if (!this.isWaterColumn(mx)) continue;
+      const h1 = this.wave.heightAt(x) * amp;
+      const h2 = this.wave.heightAt(x2) * amp;
+      // 水面法线 (-dh/dx, 1) 与光源方向 (-0.55, -0.83) 的点积 → 迎光/背光
+      const slope = (h2 - h1) / Math.max(1, x2 - x);
+      const lit = clamp(0.83 - slope * 6, 0, 1);
+      const y1 = this.surfaceAt(x) + h1;
+      const y2 = this.surfaceAt(x2) + h2;
+      const ym = this.surfaceAt(mx) + (h1 + h2) * 0.5;
+
+      // ① 水下暗侧（波谷处偏青暗，让起伏读得出来）
+      ctx.globalAlpha = clamp(0.07 + (1 - lit) * 0.24, 0, 0.34);
+      ctx.strokeStyle = '#123a4a';
+      ctx.lineWidth = 1.7;
+      ctx.beginPath();
+      ctx.moveTo(x, y1 + 1.7);
+      ctx.quadraticCurveTo(mx, ym + 1.7, x2, y2 + 1.7);
+      ctx.stroke();
+
+      // ② 水线亮痕（斜率越大越亮越粗 = 波峰附近的高光）
+      ctx.globalAlpha = clamp(0.14 + lit * 0.28 + Math.abs(slope) * 0.5, 0, 0.72);
+      ctx.strokeStyle = '#f2fbff';
+      ctx.lineWidth = 1.1 + Math.min(1.5, Math.abs(slope) * 1.6);
+      ctx.beginPath();
+      ctx.moveTo(x, y1);
+      ctx.quadraticCurveTo(mx, ym, x2, y2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -1396,19 +1616,51 @@ export class World {
     ctx.restore();
   }
 
-  /** 落点溅射环 */
+  /**
+   * 落点溅射（阶段 8-④ 重做）
+   *
+   * 旧版画的是"同心椭圆环 r 逐渐变大"—— 那是俯视水面的现象，
+   * 放在侧视剖面里就是最扎眼的违和感。现在改成：
+   *   ① 垂直水花：3 条向上溅的短竖线（只有下落才溅得起来）；
+   *   ② 横向短痕：贴着水线向两侧摊开的一小段（"被推出去的痕"，不是环）。
+   * 溅射的 y 一律归到该 x 的**水线**上：入水本来就发生在水面，
+   * 不该跟着施扰点跑到水下十几像素。
+   */
   _drawRipples(ctx) {
     if (!this.ripples.length) return;
     ctx.save();
+    ctx.lineCap = 'round';
     for (const rp of this.ripples) {
-      const k = rp.r / rp.maxR;
-      ctx.globalAlpha = Math.max(0, rp.alpha) * (1 - k);
-      ctx.strokeStyle = '#e6f6fb';
-      ctx.lineWidth = 1.4 * (1 - k * 0.6);
+      const k = clamp(rp.r / rp.maxR, 0, 1);
+      const a = Math.max(0, rp.alpha) * (1 - k);
+      if (a <= 0.012) continue;
+      const x = rp.x;
+      const y = this.isWaterColumn(x) ? this.surfaceAt(x) + 1 : rp.y;
+
+      // ① 垂直水花
+      const hMax = (6 + rp.maxR * 0.32) * (1 - k);
+      for (let i = -1; i <= 1; i++) {
+        const ox = i * (2.0 + rp.maxR * 0.05);
+        ctx.globalAlpha = a * (1 - Math.abs(i) * 0.28);
+        ctx.strokeStyle = '#f4fcff';
+        ctx.lineWidth = 1.15;
+        ctx.beginPath();
+        ctx.moveTo(x + ox, y);
+        ctx.lineTo(x + ox + ox * 0.45, y - hMax * (1 - Math.abs(i) * 0.22));
+        ctx.stroke();
+      }
+
+      // ② 沿水线摊开的短横痕
+      const L = rp.r * 1.7 + 3;
+      ctx.globalAlpha = a * 0.8;
+      ctx.strokeStyle = '#ddf3fb';
+      ctx.lineWidth = 1.35 * (1 - k * 0.5);
       ctx.beginPath();
-      ctx.ellipse(rp.x, rp.y, rp.r, rp.r * 0.40, 0, 0, Math.PI * 2);
+      ctx.moveTo(x - L, y + 1.1);
+      ctx.quadraticCurveTo(x, y + 2.4, x + L, y + 1.1);
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 }

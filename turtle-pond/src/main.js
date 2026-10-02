@@ -861,37 +861,49 @@ export class PondApp {
       const tk = nat.waveTurtleStr ?? 0.07;
       const exp = nat.waveSizeExp ?? 2.4;        // 体型指数：越大个体差异越夸张
       const jitter = nat.waveSizeJitter ?? 0.25; // 同体型个体间的随机摆动幅度
+      const fade = nat.waveDepthFade ?? 52;      // 起波随深度衰减的尺度（px）
 
       // 参照体型 = 该物种成年体型中值，用它做归一化，避免"小鱼物种天生吃亏"
       const fishRef = (CONFIG.fish.minSize + CONFIG.fish.maxSize) / 2;  // = 9.5
       const turtleRef = CONFIG.turtle.size;                            // = 34
+      const W = this.world;
 
       if (fk > 0) {
         for (const f of this.fishes) {
-          if (f.dying || !this.world.isWater(f.x, f.y)) continue;
+          if (f.dying || !W.isWater(f.x, f.y)) continue;
           // 注意：f.size 已含品种 sizeScale，这里不能再乘一次
           // 以**当前**体型算（幼鱼小 → 波小；长大 → 波自然变大）
           const ratio = Math.max(0.25, f.size / fishRef);
           // 每只鱼一个固定个性因子（0.78~1.22），同尺寸也不整齐
           const idio = f._waveIdio ?? (f._waveIdio = 1 + (Math.random() * 2 - 1) * jitter);
-          const s = fk * 0.13 * Math.pow(ratio, exp) * idio;
+          // 深度权重（阶段 8-④）：越靠水面起波越强，沉在池底几乎不动水面
+          const depth = Math.max(0, f.y - W.surfaceAt(f.x));
+          const dw = Math.exp(-depth / fade);
+          const s = fk * 0.13 * Math.pow(ratio, exp) * idio * dw;
+          if (s < 0.0015) continue;
           // 半径 1~3 随体型：小鱼细痕，大鱼宽波
           const rad = 1 + Math.round(Math.min(1, ratio * 0.7) * 1.6);
-          this.world.wave.disturb(f.x, f.y, s, rad);
+          W.wave.disturb(f.x, f.y, s, rad);
+          // 拖尾：痕迹留在**身后**那一小段位移上
+          W._pushWake(f.x - f.vx * 0.4, f.x, s * 2.2, true, depth);
         }
       }
       if (tk > 0) {
         for (const t of this.turtles) {
-          if (t.dying || !this.world.isWater(t.x, t.y)) continue;
+          if (t.dying || !W.isWater(t.x, t.y)) continue;
           // 只在龟真正移动时起波（趴着晒背不起）
           const sp = Math.hypot(t.vx ?? 0, t.vy ?? 0);
           if (sp <= 2) continue;
           // t.size 已含 sizeScale，幼龟小 → 波小
           const ratio = Math.max(0.25, t.size / turtleRef);
           const idio = t._waveIdio ?? (t._waveIdio = 1 + (Math.random() * 2 - 1) * jitter);
-          const s = tk * 2.2 * Math.pow(ratio, exp * 0.8) * idio;
+          const depth = Math.max(0, t.y - W.surfaceAt(t.x));
+          const dw = Math.exp(-depth / fade);
+          const s = tk * 2.2 * Math.pow(ratio, exp * 0.8) * idio * dw;
+          if (s < 0.0008) continue;
           const rad = 2 + Math.round(Math.min(1.4, ratio) * 1.5);
-          this.world.wave.disturb(t.x, t.y, s, rad);
+          W.wave.disturb(t.x, t.y, s, rad);
+          W._pushWake(t.x - t.vx * 0.5, t.x, s * 2.6, true, depth);
         }
       }
     }

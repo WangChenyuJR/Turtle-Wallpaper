@@ -49,17 +49,21 @@ export function runSelfTest(app) {
       `梯度采样 h=${s.h.toFixed(2)}`);
 
     // ── 2. 拖拽尾迹链路 ─────────────────────────────
+    // 阶段 8-④ 起"水面拖尾"只认水线附近（±wakeBand），深水改成水下搅动，
+    // 所以这里必须用**水线附近**的 y，不能用池中的 midY。
+    const surfY = W.surfaceAt(midX) + 4;
     wave.calm();
     for (let i = 0; i < 6; i++) {
-      W.addWake(midX - 120 + i * 40, midY, midX - 80 + i * 40, midY + 6, 700);
+      W.addWake(midX - 120 + i * 40, surfY, midX - 80 + i * 40, surfY + 6, 700);
     }
     ok(wave.energy() > 1, `尾迹写入波场 E=${wave.energy().toFixed(1)}`);
+    ok(W.wakeTrails.length > 0, `拖尾痕迹入列 n=${W.wakeTrails.length}`);
 
     wave.calm();
     const baseE = wave.energy();
     for (let i = 0; i <= 30; i++) {
       window.dispatchEvent(new MouseEvent('mousemove', {
-        clientX: midX - 150 + i * 10, clientY: midY + Math.sin(i * 0.5) * 12,
+        clientX: midX - 150 + i * 10, clientY: surfY + Math.sin(i * 0.5) * 12,
       }));
     }
     ok(wave.energy() > Math.max(baseE * 2, 0.5), `mousemove 尾迹 E=${wave.energy().toFixed(2)}`);

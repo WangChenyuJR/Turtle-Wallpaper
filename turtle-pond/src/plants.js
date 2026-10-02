@@ -485,7 +485,12 @@ export class Plant {
     const S = this.shape;
     const x = this.px, y = this.py;
     const r = this.size;
-    const bob = Math.sin(time * 1.1 + this.swayPhase) * sp.sway;
+    // 跟随一维水面波场（阶段 8-④）：水一荡，荷叶跟着上下起伏。
+    // 假 world（诊断脚本）没有 wave，取值兜底为 0，断言不受影响。
+    const waveLift = this.world?.wave?.heightAt
+      ? this.world.wave.heightAt(x) * (CONFIG.natural?.waveAmp ?? 6) * 0.7
+      : 0;
+    const bob = Math.sin(time * 1.1 + this.swayPhase) * sp.sway + waveLift;
 
     // 侧视：叶片**不允许整圈旋转** —— 俯视时代的 `this.rot` 是 `rand(0, 2π)`，
     // 一旦接近 π/2，压扁的椭圆就会"立起来"变成竖着的一片叶子。
