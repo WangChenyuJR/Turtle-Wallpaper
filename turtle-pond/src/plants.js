@@ -30,6 +30,34 @@ function tint(hex, f) {
 }
 
 // ══════════════════════════════════════════════════════════
+//  侧 视 荷 叶 参 数（阶段 8-①）
+// ══════════════════════════════════════════════════════════
+/**
+ * 为什么是"俯视 → 侧视"而不是"再压扁一点"：
+ * 原来那版（阶段 6-⑤⑥）只是把俯视画法整层 ctx.scale(1, 0.58) 压扁，
+ * 于是 **360° 放射的叶脉** 和 **360° 绕圈的放射花瓣** 也跟着一起压扁 ——
+ * 看上去仍然"是从上往下看的一片叶子被压扁了"，而不是浮在侧视水面上的一片荷叶。
+ *
+ * 这一版的做法：
+ *   · 压扁写进**路径顶点**（`_leafPath`），不再是整层 scale → 描边/叶脉不被二次变形
+ *   · 远端叶缘**上翘**（真实荷叶最标志性的侧视特征）
+ *   · 叶脉改成**水平浅扇形**的几条
+ *   · 茎从叶心**一直垂到池底**（原来只到水下 30px 就断了）
+ *   · 花改成**直立花梗 + 侧向张开的花冠**，不再是俯视的放射花
+ *
+ * ⚠ 这几个值刻意放在本文件而不是 config.js：改荷叶是自包含的绘制改动，
+ *   不希望在并行会话正在编辑 config.js / world.js 时去碰它们。
+ *   `CONFIG.plants` 里若出现同名项（surfaceSquash / surfaceRimLift / surfaceStemWidth），
+ *   会优先于这里的默认值生效，方便以后统一收进 Lively 属性面板。
+ */
+const SIDE = {
+  squash: 0.26,       // 叶面纵向压扁比（0.58 = 旧的"俯视压扁"，0.26 才是平铺在水面）
+  rimLift: 0.14,      // 远端叶缘上翘量（× 叶片半径）
+  stemWidth: 3.0,     // 根茎线宽上限（px）
+  veins: [3, 5],      // 侧视可见的叶脉条数区间
+};
+
+// ══════════════════════════════════════════════════════════
 //  植 物 品 种
 // ══════════════════════════════════════════════════════════
 /**
@@ -179,23 +207,26 @@ export class Plant {
     const W = this.world;
     const sp = this.sp;
     if (this.kind === 'bank') {
-      this.x = rand(W.w * 0.02, W.w * 0.98);
-      // 岸边植物靠近岸线分布（下缘贴岸线）
-      const line = W.bankLineAt(this.x);
-      this.y = line - rand(2, 16);
+      // 岸边挺水植物：长在左右岸的干地上（也长在中间晒台上）
+      const zones = W.landZones;
+      const z = zones.length ? zones[Math.floor(Math.random() * zones.length)] : { dx0: 0, dx1: W.w };
+      this.x = rand(z.dx0, Math.max(z.dx0 + 1, z.dx1));
+      this.y = W.groundYAt(this.x) - rand(0, 6);
       this.height = rand(sp.height[0], sp.height[1]) * this.scale;
     } else if (this.kind === 'surface') {
-      this.x = rand(W.w * 0.06, W.w * 0.94);
-      // 浮叶偏向靠岸的浅水区（视觉层次）
-      const top = W.bankLineAt(this.x);
-      const bot = W.marshLineAt(this.x);
-      this.y = clamp(top + (bot - top) * rand(0.08, 0.46), top + 10, bot - 20);
+      // 浮叶：贴在水线上（侧视 + 俯角，看到的是叶片的"上表面"）
+      const s = W.waterSpans[Math.floor(Math.random() * W.waterSpans.length)] ?? { x0: 0, x1: W.w };
+      this.x = rand(s.x0 + 18, Math.max(s.x0 + 19, s.x1 - 18));
+      this.y = W.surfaceAt(this.x) + rand(1, 5);
       this.size = rand(sp.size[0], sp.size[1]) * this.scale;
       this.hasFlower = Math.random() < 0.45;
     } else { // submerged
-      this.x = rand(W.w * 0.05, W.w * 0.95);
-      this.y = W.marshLineAt(this.x) - rand(4, 26);
-      this.height = rand(sp.height[0], sp.height[1]) * this.scale;
+      // 沉水植物：根在池底，往上长（高度受水深限制，别戳出水面）
+      const s = W.waterSpans[Math.floor(Math.random() * W.waterSpans.length)] ?? { x0: 0, x1: W.w };
+      this.x = rand(s.x0 + 12, Math.max(s.x0 + 13, s.x1 - 12));
+      this.y = W.groundYAt(this.x) - rand(1, 5);
+      const room = Math.max(14, W.surfaceAt(this.x) - this.y - 8);
+      this.height = Math.min(rand(sp.height[0], sp.height[1]) * this.scale, room);
     }
   }
 
@@ -342,21 +373,46 @@ export class Plant {
   }
 
   /**
+   * 远端叶缘上翘量（阶段 8-①）。
+   * 侧视荷叶最标志性的特征就是**叶缘往上翻**——俯视画法里看不出来。
+   * 只对"远端"（屏幕上方那半边，syRaw < 0）生效，近端保持平贴水面。
+   * @param {number} syRaw 未压扁的纵向半径（< 0 表示远端）
+   * @param {number} r 叶片基准半径
+   */
+  _rimLiftAt(syRaw, r) {
+    const lift = this._rimLift || 0;
+    if (!lift) return 0;
+    const u = -syRaw / (r * 1.08);          // 0 = 叶心一线，1 = 最远端
+    if (u <= 0) return 0;
+    return lift * Math.pow(Math.min(1, u), 1.5);
+  }
+
+  /**
    * 叶形路径：椭圆化 + 波浪边 + 从叶心切开的缺口（真实莲叶的 V 口）。
+   *
+   * 阶段 8-① 起这条件**直接产出侧视形状**：纵向按 `_squash` 压扁（不再用
+   * ctx.scale 整层压扁 —— 那样描边和叶脉也会跟着变形），远端叶缘再抬 `_rimLift`。
+   * 于是叶片看起来是"平铺在水面、边缘微微上翻的一道浅碗"，而不是"俯视的圆被压扁"。
+   *
    * @param {number} r 基准半径
-   * @param {number} [scale] 整体缩放（描边高光时用 0.96 之类）
+   * @param {number} [scale] 整体缩放（描边高光时用 0.94 之类）
    */
   _leafPath(ctx, r, scale = 1) {
     const S = this.shape;
+    const sq = this._squash ?? 0.26;
     const start = S.notchA + S.notchW;
     const end = S.notchA - S.notchW + Math.PI * 2;
-    const steps = 42;
+    const steps = 48;
     ctx.beginPath();
     ctx.moveTo(0, 0);
     for (let i = 0; i <= steps; i++) {
       const t = start + (end - start) * (i / steps);
       const k = this._leafK(t) * scale;
-      ctx.lineTo(Math.cos(t) * r * k * S.sx, Math.sin(t) * r * k * S.sy);
+      const syRaw = Math.sin(t) * r * k * S.sy;
+      ctx.lineTo(
+        Math.cos(t) * r * k * S.sx,
+        syRaw * sq - this._rimLiftAt(syRaw, r)
+      );
     }
     ctx.closePath();
   }
@@ -423,61 +479,52 @@ export class Plant {
     ctx.restore();
   }
 
-  // ── 水面浮叶：莲叶 + 可选花（外形随机，不再是正圆）──
+  // ── 水面浮叶：**侧视**荷叶 + 可选花（阶段 8-① 重制）──
   _drawSurfacePlant(ctx, time) {
     const sp = this.sp;
     const S = this.shape;
     const x = this.px, y = this.py;
     const r = this.size;
     const bob = Math.sin(time * 1.1 + this.swayPhase) * sp.sway;
-    const rot = this.rot + Math.sin(time * 0.4 + this.phase) * 0.05;
 
+    // 侧视：叶片**不允许整圈旋转** —— 俯视时代的 `this.rot` 是 `rand(0, 2π)`，
+    // 一旦接近 π/2，压扁的椭圆就会"立起来"变成竖着的一片叶子。
+    // 这里把随机朝向压到 ±0.4rad 的轻微倾斜，缺口位置仍然逐株不同。
+    const rot = (this.rot - Math.PI) * 0.13 + Math.sin(time * 0.4 + this.phase) * 0.04;
+    const sq = clamp(CONFIG.plants?.surfaceSquash ?? SIDE.squash, 0.10, 0.60);
+    this._squash = sq;
+    this._rimLift = r * (CONFIG.plants?.surfaceRimLift ?? SIDE.rimLift);
+
+    // ── ① 根茎：从叶心一直垂到池底（世界坐标，不随叶片旋转）──
+    this._drawStem(ctx, x, y + bob, time);
+
+    // ── ② 叶片 ────────────────────────────────────────
     ctx.save();
     ctx.translate(x, y + bob);
     ctx.rotate(rot);
 
-    // 水下茎蔓（淡淡的，也带点随机弯曲）
-    ctx.strokeStyle = sp.colorDark;
-    ctx.globalAlpha = 0.35;
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.quadraticCurveTo(r * 0.2 * S.sx, r * 0.9, r * 0.1 * S.sx, r * 1.6);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-
-    // 叶下阴影（垫出厚度感，形状与叶一致）
+    // 叶贴在水面上的接触阴影：叶心下方一条扁影（不是俯视那种整片叶形阴影）
     ctx.save();
-    ctx.translate(r * 0.07, r * 0.14);
-    this._leafPath(ctx, r);
-    ctx.fillStyle = 'rgba(10, 30, 20, 0.26)';
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = '#0a1e14';
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.09, r * 0.90 * S.sx, Math.max(1.5, r * 0.11), 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 
-    // 叶片本体：椭圆化 + 波浪边 + 随机缺口（不再是完美正圆）
-    const g = ctx.createLinearGradient(-r * S.sx, -r * S.sy, r * S.sx, r * S.sy);
-    g.addColorStop(0, tint(sp.color, 1.12));
-    g.addColorStop(1, tint(sp.color, 0.84));
+    // 叶片本体：远端（上）亮、近端（下）暗 —— 侧视的自然受光方向
+    const g = ctx.createLinearGradient(
+      0, -r * S.sy * sq - (this._rimLift || 0), 0, r * S.sy * sq
+    );
+    g.addColorStop(0, tint(sp.color, 1.16));
+    g.addColorStop(0.55, tint(sp.color, 1.0));
+    g.addColorStop(1, tint(sp.color, 0.80));
     ctx.fillStyle = g;
     this._leafPath(ctx, r);
     ctx.fill();
 
-    // 叶脉：从叶心放射，长度跟随波浪边缘（不会穿出叶外），避开缺口扇区
-    ctx.strokeStyle = sp.colorDark;
-    ctx.globalAlpha = 0.45;
-    ctx.lineWidth = Math.max(0.7, r * 0.035);
-    const nv = S.veins;
-    const a0 = S.notchA + S.notchW + 0.15;
-    const a1 = S.notchA - S.notchW - 0.15 + Math.PI * 2;
-    for (let i = 0; i < nv; i++) {
-      const t = a0 + (a1 - a0) * (i / (nv - 1));
-      const k = this._leafK(t) * 0.9;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(t) * r * k * S.sx, Math.sin(t) * r * k * S.sy);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
+    // 叶脉：只沿**水平方向**浅扇形展开（俯视的 360° 放射是"看着像俯视"的主因之一）
+    this._drawSideVeins(ctx, r);
 
     // 外缘描边（深色收边）+ 内侧高光（随波浪边走）
     ctx.strokeStyle = sp.colorDark;
@@ -491,44 +538,153 @@ export class Plant {
     this._leafPath(ctx, r, 0.93);
     ctx.stroke();
 
-    // 花：双层花瓣、长短宽窄逐瓣随机，花心为不规则小团
-    if (this.hasFlower) {
-      const base = r * (sp.id === 'lotus' ? 0.52 : 0.44);
-      ctx.save();
-      ctx.translate(S.flowerOx * r, S.flowerOy * r);
-      ctx.rotate(S.flowerRot);
-      for (let ring = 0; ring < 2; ring++) {
-        const count = ring === 0 ? S.petals : Math.max(3, Math.round(S.petals * 0.6));
-        const len0 = base * (ring === 0 ? 1 : 0.62);
-        ctx.fillStyle = ring === 0 ? sp.flower : tint(sp.flower, 0.88);
-        for (let i = 0; i < count; i++) {
-          const a = (i / count) * Math.PI * 2 + ring * 0.5 + S.petalJit[i % S.petalJit.length];
-          const len = len0 * S.petalLen[(i + ring * 3) % S.petalLen.length];
-          const wid = len * S.petalWid[(i * 2 + ring) % S.petalWid.length];
-          ctx.save();
-          ctx.rotate(a);
-          ctx.beginPath();
-          ctx.moveTo(0, 0);
-          ctx.quadraticCurveTo(len * 0.45, -wid, len, -wid * 0.1);
-          ctx.quadraticCurveTo(len * 0.5, wid * 0.9, 0, 0);
-          ctx.closePath();
-          ctx.fill();
-          ctx.restore();
-        }
-      }
-      // 花心：不规则团 + 花蕊点
-      ctx.fillStyle = sp.flowerCore;
-      blobPath(ctx, 0, 0, base * 0.34, base * 0.3, S.coreAmps, S.corePhases, S.flowerRot * 1.7);
-      ctx.fill();
-      ctx.fillStyle = 'rgba(120, 84, 30, 0.8)';
-      for (let i = 0; i < S.stamens; i++) {
-        const a = (i / S.stamens) * Math.PI * 2 + 0.6;
+    // 叶子画完了（描边/高光已在上面的叶片坐标系里完成）
+    ctx.restore();     // 叶片（平移 + 旋转）
+
+    // ── ③ 花：直立花梗 + 侧向张开的花冠（阶段 8-①）──
+    // 俯视时代的花是"花瓣绕一圈 360° 放射"，搁在侧视里一眼就假；
+    // 现在花瓣只朝**上方左右**张开成一个扇形，花心落在花托处。
+    if (this.hasFlower) this._drawSideFlower(ctx, x, y + bob, time);
+  }
+
+  /**
+   * 根茎：从叶心一直垂到池底（阶段 8-①）。
+   * 旧版只画到水下 `r*0.95`（16~30px）就断了，所以"荷叶浮在水面、底下什么都没有"。
+   * 真实荷叶是靠一条长茎从水底淤泥长上来的 —— 这条茎也是侧视剖面里"水体有纵深"的视觉锚点。
+   * 用世界坐标绘制，不参与叶片的平移/旋转。越深越暗越透明（被水体吃掉）。
+   */
+  _drawStem(ctx, x, y, time) {
+    const W = this.world;
+    const sp = this.sp;
+    const gY = W.groundYAt(x);
+    const len = gY - y;
+    if (!(len > 6)) return;                    // 浅水区叶子几乎贴着底 → 不画
+
+    const grad = ctx.createLinearGradient(0, y, 0, gY);
+    grad.addColorStop(0.00, sp.colorDark);
+    grad.addColorStop(0.45, 'rgba(58,84,52,0.70)');
+    grad.addColorStop(1.00, 'rgba(46,54,36,0.34)');
+
+    // 轻微水流摆动：茎越长摆幅越大，但不夸张（避免像水草那样飘）
+    const amp = Math.min(13, len * 0.09);
+    const sw = Math.sin(time * 0.85 + this.swayPhase) * amp
+             + Math.sin(time * 1.9 + this.phase) * amp * 0.3;
+
+    ctx.save();
+    ctx.strokeStyle = grad;
+    ctx.lineCap = 'round';
+    ctx.lineWidth = clamp(
+      this.size * 0.085, 1.6,
+      CONFIG.plants?.surfaceStemWidth ?? SIDE.stemWidth
+    );
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.quadraticCurveTo(x + sw * 0.55, y + len * 0.5, x + sw * 0.12, gY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** 侧视叶脉：只沿水平方向浅扇形展开的几条（阶段 8-①） */
+  _drawSideVeins(ctx, r) {
+    const S = this.shape;
+    const sp = this.sp;
+    const lo = SIDE.veins[0], hi = SIDE.veins[1];
+    const nv = clamp(lo + (S.veins % (hi - lo + 1)), lo, hi);
+
+    ctx.save();
+    ctx.strokeStyle = sp.colorDark;
+    ctx.globalAlpha = 0.42;
+    ctx.lineWidth = Math.max(0.7, r * 0.028);
+    ctx.lineCap = 'round';
+    for (let i = 0; i < nv; i++) {
+      const t01 = nv === 1 ? 0.5 : i / (nv - 1);
+      const a = -0.5 + 1.0 * t01;                     // ±28.6°，浅扇形
+      const len = r * (0.66 + 0.26 * Math.cos(a));
+      const syRaw = Math.sin(a) * len * S.sy;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(
+        Math.cos(a) * len * S.sx,
+        syRaw * (this._squash ?? SIDE.squash) - this._rimLiftAt(syRaw, r)
+      );
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * 侧视花冠（阶段 8-①）。
+   * 睡莲花矮（几乎贴在叶面上），荷花花高（挺出水面一大截）——
+   * 这是两种花在侧视里最容易区分的特征。
+   * 花瓣按"相对竖直方向 ±72°"分布，中间的瓣最长最正，两侧渐短渐倒；
+   * 第二层（内层）稍短、颜色稍深，做出层次。
+   */
+  _drawSideFlower(ctx, x, y, time) {
+    const sp = this.sp;
+    const S = this.shape;
+    const r = this.size;
+    const isLotus = sp.id === 'lotus';
+
+    const stemH = r * (isLotus ? 1.25 : 0.5);         // 花梗高度
+    const lean = Math.sin(time * 0.7 + this.phase) * r * 0.05;
+    const bx = x + S.flowerOx * r;                    // 花托
+    const by = y + S.flowerOy * r;
+    const tx = bx + lean;                             // 花托顶端
+    const ty = by - stemH;
+
+    // ── 花梗 ──
+    ctx.save();
+    ctx.strokeStyle = sp.colorDark;
+    ctx.lineWidth = clamp(r * 0.075, 1.3, 2.6);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(bx, by);
+    ctx.quadraticCurveTo(bx + lean * 0.4, by - stemH * 0.55, tx, ty);
+    ctx.stroke();
+    ctx.restore();
+
+    // ── 花冠 ──
+    const petals = clamp(S.petals, 5, 13);
+    const base = r * (isLotus ? 0.62 : 0.42);
+    ctx.save();
+    ctx.translate(tx, ty);
+    ctx.rotate(S.flowerRot * 0.12);                   // 只留一点点随机朝向，整朵不会歪掉
+
+    for (let ring = 0; ring < 2; ring++) {
+      const cnt = ring === 0 ? petals : Math.max(3, Math.round(petals * 0.6));
+      const len0 = base * (ring === 0 ? 1 : 0.64);
+      ctx.fillStyle = ring === 0 ? sp.flower : tint(sp.flower, 0.86);
+      for (let i = 0; i < cnt; i++) {
+        const t01 = cnt === 1 ? 0.5 : i / (cnt - 1);
+        const a = (-1.26 + 2.52 * t01) + (ring ? 0.18 : 0)   // 相对竖直：-72° ~ +72°
+                + S.petalJit[i % S.petalJit.length] * 0.35;  // 逐瓣轻微抖动
+        const mid = 1 - Math.abs(t01 - 0.5) * 2;             // 中间=1、两侧=0
+        const len = len0 * S.petalLen[(i + ring * 3) % S.petalLen.length] * (0.86 + 0.22 * mid);
+        const wid = len * S.petalWid[(i * 2 + ring) % S.petalWid.length];
+
+        ctx.save();
+        ctx.rotate(-Math.PI / 2 + a);                        // 朝上偏 a
         ctx.beginPath();
-        ctx.arc(Math.cos(a) * base * 0.2, Math.sin(a) * base * 0.2,
-          Math.max(0.7, base * 0.045), 0, Math.PI * 2);
+        ctx.moveTo(0, 0);
+        ctx.quadraticCurveTo(len * 0.38, -wid * 0.62, len, -wid * 0.06);
+        ctx.quadraticCurveTo(len * 0.40, wid * 0.62, 0, 0);
+        ctx.closePath();
         ctx.fill();
+        ctx.restore();
       }
-      ctx.restore();
+    }
+
+    // 花心：花托处的小团 + 花蕊点
+    ctx.fillStyle = sp.flowerCore;
+    blobPath(ctx, 0, 1.5, base * 0.30, base * 0.20, S.coreAmps, S.corePhases, S.flowerRot);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(120,84,30,0.85)';
+    for (let i = 0; i < S.stamens; i++) {
+      const a = -0.9 + 1.8 * (i / Math.max(1, S.stamens - 1));
+      ctx.beginPath();
+      ctx.arc(Math.sin(a) * base * 0.20, 1.2 + Math.cos(a) * base * 0.08,
+        Math.max(0.6, base * 0.04), 0, Math.PI * 2);
+      ctx.fill();
     }
     ctx.restore();
   }
@@ -621,21 +777,21 @@ export class PlantField {
     const p = new Plant(W, sp, zone);
     const cx = clamp(x, 8, W.w - 8);
     if (sp.kind === 'bank') {
-      p.x = cx;
-      p.y = W.bankLineAt(cx) - rand(2, 16);
+      // 岸边：吸附到最近的干地
+      p.x = W.landX(cx);
+      p.y = W.groundYAt(p.x) - rand(0, 6);
       p.height = rand(sp.height[0], sp.height[1]) * p.scale;
     } else if (sp.kind === 'surface') {
-      const top = W.bankLineAt(cx), bot = W.marshLineAt(cx);
-      p.x = cx;
-      // 落在点击的深度上，但夹在靠岸浅水区（8%~46%）
-      const t = clamp((y - top) / Math.max(1, bot - top), 0.08, 0.46);
-      p.y = clamp(top + (bot - top) * t, top + 10, bot - 20);
+      // 浮叶：落在水面上（x 吸到最近的水域）
+      p.x = W.nearWaterX(cx);
+      p.y = W.surfaceAt(p.x) + rand(1, 5);
       p.size = rand(sp.size[0], sp.size[1]) * p.scale;
       p.hasFlower = Math.random() < 0.45;
     } else {
-      p.x = cx;
-      p.y = W.marshLineAt(cx) - rand(4, 26);
-      p.height = rand(sp.height[0], sp.height[1]) * p.scale;
+      p.x = W.nearWaterX(cx);
+      p.y = W.groundYAt(p.x) - rand(1, 5);
+      const room = Math.max(14, W.surfaceAt(p.x) - p.y - 8);
+      p.height = Math.min(rand(sp.height[0], sp.height[1]) * p.scale, room);
     }
     this.plants.push(p);
     return p;
