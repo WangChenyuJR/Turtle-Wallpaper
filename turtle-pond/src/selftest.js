@@ -18,8 +18,12 @@ export function runSelfTest(app) {
   try {
     const W = app.world;
     const wave = W.wave;
-    const midX = W.w / 2;
-    const midY = (W.bankLineAt(midX) + W.marshLineAt(midX)) / 2;
+    // 侧视剖面（阶段 6-⑧）：池中央可能是晒台，所以要挑真正的"水列"和"岸列"
+    const _ws = W.waterSpans[0];
+    const midX = (_ws.x0 + _ws.x1) / 2;
+    const midY = (W.surfaceAt(midX) + W.groundYAt(midX)) / 2;
+    const bankZone = W.landZones.find((z) => z.kind === 'bank') ?? W.landZones[0];
+    const bankX = bankZone ? bankZone.mid : W.w * 0.08;
 
     // ── 1. 波场引擎物理 ─────────────────────────────
     ok(wave instanceof WaterWaveField, 'world.wave 为波动方程场');
@@ -63,6 +67,41 @@ export function runSelfTest(app) {
     // ── 3. 程序化纹理 ───────────────────────────────
     W._ensureTextures();
     ok(!!W.tex && !!W.tex.mud && !!W.tex.sand && !!W.tex.silt && !!W.tex.wetmud, '四张程序纹理生成');
+
+    // ── 3.5 岸上脚印管线（阶段 5-⑭）────────────────
+    W.footprints.length = 0;
+    const bankY = W.groundYAt(bankX) - 8;
+    ok(W.isLand(bankX, bankY), `找到岸地落点 (${bankX.toFixed(0)}, ${bankY.toFixed(0)})`);
+    {
+      W.addFootprint(bankX, bankY, 0.3, 34, 1);
+      W.addFootprint(bankX + 8, bankY + 4, 0.3, 34, -1);
+      ok(W.footprints.length === 2, `脚印入列 n=${W.footprints.length}`);
+      const life0 = W.footprints[0]?.life ?? 0;
+      W._updateFootprints(0.5);
+      const life1 = W.footprints[0]?.life ?? 1;
+      ok(life1 < life0 && life1 > 0, `脚印淡出推进 ${life0.toFixed(2)}->${life1.toFixed(2)}`);
+      // 目视验证：在岸顶铺一条左右交替的脚印带（截图可读）
+      const z = bankZone ?? { dx0: 0, dx1: W.w };
+      for (let i = 0; i < 10; i++) {
+        const fx = z.dx0 + ((z.dx1 - z.dx0) * (i + 0.5)) / 10;
+        W.addFootprint(fx, W.groundYAt(fx) - 6, 0.1, 34, i % 2 ? 1 : -1);
+      }
+    }
+
+    // ── 3.6 岸上爬行 → 脚印 端到端（主循环触发链路）──
+    const t0 = app.turtles?.[0];
+    if (t0) {
+      t0.x = bankX;
+      t0.y = W.groundYAt(bankX) - t0.size * 0.25;
+      t0.state = 'bask'; t0.stateTime = 0; t0.hunger = 0;
+      t0._baskGoal = 999;
+      t0.angle = 0.05; t0._footAcc = 0;
+      W.footprints.length = 0;
+      const simT = performance.now() / 1000;
+      for (let i = 0; i < 900; i++) app._update(1 / 60, simT + i / 60);
+      ok(W.footprints.length >= 3, `岸上爬行触发脚印 n=${W.footprints.length}`);
+      W.footprints.length = 0; // 清掉模拟痕迹，保持画面干净
+    }
 
     // ── 4. 渲染无异常 ───────────────────────────────
     let threw = false;

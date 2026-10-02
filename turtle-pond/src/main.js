@@ -19,6 +19,7 @@ import { DuckweedField, Duckweed } from './duckweed.js';
 import { FoodManager, Food } from './food.js';
 import { PlantField, Plant, PLANT_SPECIES, DEFAULT_PLANTS } from './plants.js';
 import { DayNight } from './daynight.js';
+import { PondLamp } from './lamp.js';
 import { Weather } from './weather.js';
 import { LifeArchive, KIND_LABELS, CAUSE_LABELS } from './afterlife.js';
 import { Remains, ScavengerField, Snail, Shrimp } from './scavengers.js';
@@ -34,7 +35,7 @@ import {
 } from './species.js';
 import { dist2, clamp } from './utils.js';
 
-class PondApp {
+export class PondApp {
   /**
    * @param {object} population 初始种群配置（读档失败时的回退）
    * @param {object} [opts] { resume: boolean } resume=false 强制开新水塘（忽略存档）
@@ -61,11 +62,13 @@ class PondApp {
     // 植物（阶段 5-②）：岸边/浮叶/沉水三类
     this.plants = new PlantField(this.world, DEFAULT_PLANTS);
     this.plantsEnabled = CONFIG.plants?.enabled ?? true;
-    // 昼夜循环（阶段 5-④）
+    // 昼夜循环（阶段 5-④）—— 默认跟随电脑系统时间
     this.daynight = new DayNight(CONFIG.daynight?.startT ?? 0.15);
+    // 岸边小灯（阶段 6-⑥）—— 手动开关的人工照明，必须在读档前建好（存档里有开关状态）
+    this.lamp = new PondLamp(this.world);
     // 天气（阶段 5-⑤）
     this.weather = new Weather();
-    this.weather.onRainFoodDrop = (x) => this.food.feed(x, this.world.bankLineAt(x) + 24, 1);
+    this.weather.onRainFoodDrop = (x) => this.food.feed(x, this.world.surfaceAt(x) + 8, 1);
     // 生命档案 + 遗骸 + 分解者（阶段 5-⑥⑦）
     this.archive = new LifeArchive();
     this.remains = [];
@@ -100,6 +103,20 @@ class PondApp {
     this._bindEvents();
 
     requestAnimationFrame((t) => this._loop(t));
+  }
+
+  /**
+   * 当前"可用环境光" 0~1 = 昼夜天光 ⊕ 岸边小灯补光。
+   *
+   * 小灯点亮时把光强下限抬到 CONFIG.lamp.lift（默认 0.45 ≈ 黄昏）：
+   * 夜色罩随之变淡、焦散变亮、鱼也没那么迟钝 —— 相当于"开灯照亮水塘"。
+   * 用 glow 而不是 on 做插值，开关灯是渐亮/渐灭，不会"啪"地跳一下。
+   */
+  get ambientLight() {
+    const base = CONFIG.daynight?.enabled ? this.daynight.light : 1;
+    const lift = CONFIG.lamp?.lift ?? 0.45;
+    if (!this.lamp || lift <= base) return base;
+    return base + (lift - base) * this.lamp.glow;
   }
 
   /**
@@ -186,7 +203,10 @@ class PondApp {
     for (let i = 0; i < count; i++) {
       this.eggs.push(new Egg(this.world, turtle.x + (Math.random() - 0.5) * 16, turtle.y + 6, turtle.species));
     }
-    this.world.addRipple(turtle.x, this.world.bankLineAt(turtle.x) + 6, 0.8);
+    // 产蛋的小水花：只有站在水边（该列是水）才起涟漪
+    if (this.world.isWaterColumn(turtle.x)) {
+      this.world.addRipple(turtle.x, this.world.surfaceAt(turtle.x) + 6, 0.8);
+    }
     return true;
   }
 
@@ -216,6 +236,12 @@ class PondApp {
       if (e.button === 0) {
         if (this.panel.handleCanvasClick(e.clientX, e.clientY)) {
           this.picker.close();          // 选生物看资料时，收起选品种面板
+          return;
+        }
+        // 点中岸边小灯 → 只开关那盏灯，不投喂、不弹「选品种」面板（阶段 6-⑥⑦）
+        const li = this.lamp ? this.lamp.hitIndex(e.clientX, e.clientY) : -1;
+        if (li >= 0) {
+          this.toggleLampAt(li);
           return;
         }
         this.food.feed(e.clientX, e.clientY);
@@ -265,6 +291,10 @@ class PondApp {
           break;
         case 'p':
           this.plantsEnabled = !this.plantsEnabled;
+          break;
+        case 'i':
+          // 岸边小灯开关（手动照明；夜里太黑就按一下）
+          this.toggleLamp();
           break;
         case 'n':
           // 时间快进开关（×25），观赏昼夜交替用
@@ -621,6 +651,98 @@ class PondApp {
     return this.plantsEnabled;
   }
 
+  // ── 寿命（阶段 6-⑧）──────────────────────────────────
+  /**
+   * 调整全局寿命倍率，并**立即对现役居民生效**（按比例缩放剩余寿命）。
+   * @param {number} v 倍率（0.2~5）
+   * @returns {number} 生效后的倍率
+   */
+  setLongevity(v) {
+    const next = clamp(Number(v) || 1, 0.2, 5);
+    const prev = CONFIG.life?.longevity ?? 1;
+    if (CONFIG.life) CONFIG.life.longevity = next;
+    if (next !== prev && prev > 0) {
+      const k = next / prev;
+      for (const t of this.turtles) {
+        t.maxAge *= k;
+        if (!t.dying && t.age >= t.maxAge) t.startDeath('old');
+      }
+      for (const f of this.fishes) {
+        f.maxAge *= k;
+        if (!f.dying && f.age >= f.maxAge) f.startDeath('old');
+      }
+      // 饿死时长也跟着缩放：壁纸经常无人投喂，"寿命倍率"应当整条时间线一起拉长，
+      // 否则把倍率调到 5 也挡不住 2 小时没粮就饿死（2026-10-02）。
+      const L = CONFIG.life;
+      if (L) {
+        for (const key of ['turtleStarveDeath', 'fishStarveDeath']) {
+          const base = L[`_base_${key}`] ?? L[key];
+          if (!Number.isFinite(base)) continue;
+          L[`_base_${key}`] = base;
+          L[key] = base * next;
+        }
+      }
+    }
+    return next;
+  }
+
+  /** 当前寿命/成长相关的设置（供控制台查看） */
+  lifeInfo() {
+    return {
+      longevity: CONFIG.life?.longevity ?? 1,
+      fishMaxAge: CONFIG.life?.fishMaxAge,
+      turtleMaxAge: CONFIG.life?.turtleMaxAge,
+      fishStarveDeath: CONFIG.life?.fishStarveDeath,
+      turtleStarveDeath: CONFIG.life?.turtleStarveDeath,
+      growth: {
+        fishMaturityAge: CONFIG.growth?.fishMaturityAge,
+        turtleMaturityAge: CONFIG.growth?.turtleMaturityAge,
+      },
+      hungerDecay: {
+        fish: CONFIG.fish?.hungerDecay,
+        turtle: CONFIG.turtle?.hungerDecay,
+      },
+    };
+  }
+
+  // ── 岸边小灯（阶段 6-⑥ 手动开关 / 6-⑦ 多盏高斯柔光）──
+  /** 灯组的说法：1 盏叫"小灯"，多盏叫"几盏灯" */
+  _lampLabel() {
+    const n = this.lamp?.count ?? 1;
+    return n > 1 ? `${n} 盏小灯` : '岸边小灯';
+  }
+
+  /**
+   * 一起开关整组小灯（I 键 / Lively 设置）。
+   * @param {boolean} [force] 指定状态；不传则反相
+   * @returns {boolean} 开关后的状态
+   */
+  toggleLamp(force) {
+    if (!this.lamp) return false;
+    const on = force === undefined ? this.lamp.toggle() : this.lamp.set(force);
+    this._toast(on
+      ? `🏮 ${this._lampLabel()}：亮（高斯柔光铺开一片）`
+      : `🌑 ${this._lampLabel()}：灭`);
+    this.save.touch();
+    return on;
+  }
+
+  /**
+   * 单独开关第 i 盏（点哪盏亮哪盏）。
+   * @param {number} i 灯的索引
+   * @returns {boolean} 这一盏开关后的状态
+   */
+  toggleLampAt(i) {
+    if (!this.lamp) return false;
+    const n = this.lamp.count;
+    const on = this.lamp.toggleAt(i);
+    const lit = this.lamp.litCount;
+    const tag = n > 1 ? `第 ${i + 1} 盏（${lit}/${n}）` : '岸边小灯';
+    this._toast(on ? `🏮 ${tag}：亮` : `🌑 ${tag}：灭`);
+    this.save.touch();
+    return on;
+  }
+
   // ── 主循环 ────────────────────────────────────────────
   _loop(now) {
     let dt = (now - this.lastTime) / 1000;
@@ -653,7 +775,9 @@ class PondApp {
     this.time = time;
     // 昼夜推进
     if (CONFIG.daynight?.enabled) this.daynight.update(dt);
-    const light = CONFIG.daynight?.enabled ? this.daynight.light : 1;
+    // 小灯渐亮/渐灭（跟随系统时间后夜里更黑，这盏灯是唯一的补光）
+    if (this.lamp) this.lamp.update(dt);
+    const light = this.ambientLight;
     const env = {
       light,
       isNight: CONFIG.daynight?.enabled ? this.daynight.isNight : false,
@@ -675,11 +799,28 @@ class PondApp {
     // 乌龟（夜晚不上岸、岸上加速回水）
     for (const t of this.turtles) {
       const wasInWater = this.world.isWater(t.x, t.y);
+      const px = t.x, py = t.y;
       t.update(dt, this.food.items, this.cursor, this.turtles, env);
       // 从岸上回到水里 → 溅水声（阶段 5-⑨）
       if (!wasInWater && this.world.isWater(t.x, t.y) && !t.dying) {
         this.audio.playSplash(0.9);
         this.world.addRipple(t.x, this.world.bankLineAt(t.x) + 4, 1.1);
+      }
+      // ── 岸上爬行脚印（阶段 5-⑭）──────────────────────
+      // 只在岸上、真的在移动时留印；左右脚交替（跨过一个 stepDist 落一只）
+      if (!t.dying && this.world.isBank(t.x, t.y)) {
+        t._footAcc = (t._footAcc ?? 0) + Math.hypot(t.x - px, t.y - py);
+        const stepDist = Math.max(7, t.size * 0.34);   // 体型越大步距越大
+        if (t._footAcc >= stepDist) {
+          t._footAcc = 0;
+          t._footSide = -(t._footSide ?? 1);           // 左右交替
+          // 脚印落在身体侧后方一点，朝行进方向的反向偏移
+          const back = Math.atan2(t.y - py, t.x - px) + Math.PI;
+          const sx = Math.cos(back) * stepDist * 0.35;
+          const sy = Math.sin(back) * stepDist * 0.35 + t._footSide * t.size * 0.16;
+          this.world.addFootprint(t.x + sx, t.y + sy,
+            Math.atan2(t.y - py, t.x - px), t.size, t._footSide);
+        }
       }
     }
 
@@ -811,11 +952,15 @@ class PondApp {
           // 每窝孵化 1 只幼龟（多余的蛋为"未受精"自然消失）
           const baby = new Turtle(this.world, this.turtles.length, egg.species, { baby: true });
           baby.x = egg.x;
-          baby.y = Math.max(egg.y, this.world.bankLineAt(egg.x) + 14);
-          baby.state = 'return';   // 破壳后先爬回水里
+          // 破壳后先站在产蛋点的干地上，再爬回水里
+          baby.y = this.world.groundYAt(egg.x) - baby.size * 0.34;
+          baby.state = 'return';
+          baby.stateTime = 0;
           baby.onLayEggs = (t) => this._turtleLayEggs(t);
           this.turtles.push(baby);
-          this.world.addRipple(egg.x, this.world.bankLineAt(egg.x) + 8, 1.0);
+          if (this.world.isWaterColumn(egg.x)) {
+            this.world.addRipple(egg.x, this.world.surfaceAt(egg.x) + 8, 1.0);
+          }
         }
       }
     }
@@ -863,7 +1008,7 @@ class PondApp {
     this.world.draw(ctx, time);
 
     // 岸线水面高光带（阶段 5-⑧）
-    this.fx.drawWaterEdge(ctx, time, CONFIG.daynight?.enabled ? this.daynight.light : 1);
+    this.fx.drawWaterEdge(ctx, time, this.ambientLight);
 
     // ── 植物分层绘制 ──────────────────────────────────
     if (this.plantsEnabled) {
@@ -872,6 +1017,9 @@ class PondApp {
       // 2) 沉水植物（水底）
       this.plants.drawLayer(ctx, time, 'submerged');
     }
+
+    // 岸边小灯（阶段 6-⑥）：人工物画在岸边植物之上，像真的立在草丛前
+    if (this.lamp) this.lamp.drawBody(ctx, this.ambientLight);
 
     // 龟蛋（埋在岸边沙土，画在岸边植物之上）
     for (const egg of this.eggs) egg.draw(ctx);
@@ -890,15 +1038,19 @@ class PondApp {
     for (const t of this.turtles) this.fx.drawShadow(ctx, t);
     for (const f of this.fishes) this.fx.drawShadow(ctx, f);
 
-    // 生物
-    for (const t of this.turtles) t.draw(ctx);
-    for (const f of this.fishes) f.draw(ctx);
+    // 生物（阶段 5-⑭：水下个体按深度叠加水色，越深越被水吞没）
+    for (const t of this.turtles) { t.draw(ctx); this._waterTint(ctx, t); }
+    for (const f of this.fishes) { f.draw(ctx); this._waterTint(ctx, f); }
 
     // 小虾（水中层，阶段 5-⑦）
     this.scavengers.draw(ctx, time, 'top');
 
+    // ── 水下浸没感（阶段 5-⑭）：水面遮挡带 + 折射扭曲线 ──
+    const lightNow0 = this.ambientLight;
+    this.fx.drawSubmerged(ctx, time, lightNow0);
+
     // ── 水下景深雾 + 水面焦散（阶段 5-⑧）─────────────
-    const lightNow = CONFIG.daynight?.enabled ? this.daynight.light : 1;
+    const lightNow = this.ambientLight;
     this.fx.drawDepthFog(ctx, lightNow);
     this.fx.drawCaustics(ctx, time, lightNow, CONFIG.weather?.enabled && this.weather.state === 'rain');
 
@@ -907,10 +1059,13 @@ class PondApp {
       this.plants.drawLayer(ctx, time, 'surface');
     }
 
-    // 昼夜色罩（全屏氛围光，在 HUD 之前）
+    // 昼夜色罩（全屏氛围光，在 HUD 之前；小灯补光后传合成亮度，罩会变淡）
     if (CONFIG.daynight?.enabled) {
-      this.daynight.drawOverlay(ctx, this.world);
+      this.daynight.drawOverlay(ctx, this.world, this.ambientLight);
     }
+
+    // 小灯的光（阶段 6-⑥）：画在色罩之后用 lighter 叠上去，才不会被夜色压掉
+    if (this.lamp) this.lamp.drawGlow(ctx, this.daynight.light, time);
 
     // 天气色罩 + 雨丝（阶段 5-⑤，在昼夜罩之上）
     if (CONFIG.weather?.enabled) {
@@ -949,6 +1104,49 @@ class PondApp {
 
     // 自测徽章（?selftest=1 时把断言结果直接画上 canvas，headless 截图可读）
     if (this._selftestResult) drawTestBadge(ctx, this._selftestResult);
+  }
+
+  /**
+   * 水下浸没罩（阶段 5-⑭）—— 紧跟在某只生物 draw 之后调用。
+   * 只在该生物已绘制的像素上（source-atop）叠一层水色，实现"被水盖住"。
+   * 叠加强度 = 基础 × 该个体的潜水深度（龟有 depth，鱼用 y 换算），
+   * 越深越被水体吞没，靠近水面则几乎透明（能看到清晰的个体）。
+   */
+  _waterTint(ctx, c) {
+    if (!(CONFIG.fx?.submerged ?? true)) return;
+    const W = this.world;
+    if (!W.isWater(c.x, c.y)) return;          // 岸上不叠水色
+    const light = this.ambientLight;
+    // 龟读个体深度，鱼用所处 y 的纵深换算
+    const depth = c.depth != null ? c.depth : this.fx.depthAt(c.y, c.x);
+    const base = CONFIG.fx?.submergedStrength ?? 0.30;
+    const a = base * (0.25 + depth * 0.75) * (0.6 + 0.4 * light);
+    if (a <= 0.01) return;
+
+    const s = c.size * (c.kind === 'turtle' ? (CONFIG.art?.turtleScale ?? 0.72) : 1);
+    const r = Math.max(12, s * 0.95);
+
+    // 用离屏层合成：把"这只生物"从当前画面抠出来，叠水色后再贴回。
+    // 关键是 source-atop 只作用在该层已有像素（= 生物本身），不会污染背景。
+    const cv = this._tintCv || (this._tintCv = document.createElement('canvas'));
+    const size = Math.ceil(r * 2);
+    if (cv.width !== size || cv.height !== size) { cv.width = size; cv.height = size; }
+    const tctx = cv.getContext('2d');
+    tctx.clearRect(0, 0, size, size);
+    // 把生物所在区域复制过来
+    tctx.drawImage(ctx.canvas, c.x - r, c.y - r, r * 2, r * 2, 0, 0, size, size);
+    // 只在水色圆内做 source-atop：圆外像素保持原样
+    const g = tctx.createRadialGradient(r, r, r * 0.15, r, r, r);
+    g.addColorStop(0, `rgba(58,124,148,${a.toFixed(3)})`);
+    g.addColorStop(0.7, `rgba(52,112,136,${(a * 0.55).toFixed(3)})`);
+    g.addColorStop(1, 'rgba(48,104,128,0)');
+    tctx.save();
+    tctx.globalCompositeOperation = 'source-atop';
+    tctx.fillStyle = g;
+    tctx.fillRect(0, 0, size, size);
+    tctx.restore();
+    // 贴回主画面（此时画的整块都含原像素 + 水色，圆外没被改动）
+    ctx.drawImage(cv, c.x - r, c.y - r, r * 2, r * 2);
   }
 
   /** 短暂提示条（S 存档 / Shift+S 导出等） */
@@ -994,13 +1192,17 @@ class PondApp {
       babies > 0 ? `幼龟 ${babies}` : null,
       this.eggs.length > 0 ? `蛋 ${this.eggs.length}` : null,
     ].filter(Boolean).join('  ');
-    // 时段显示（昼夜开启时）
-    const dn = CONFIG.daynight?.enabled ? `  |  ${this.daynight.phase.icon} ${this.daynight.phase.label}${this.daynight.speed > 1 ? ` ×${this.daynight.speed}` : ''}` : '';
+    // 时段显示（昼夜开启时）：图标 + 时段 + 当前钟点（跟随系统时间时就是真实时间）
+    const dn = CONFIG.daynight?.enabled
+      ? `  |  ${this.daynight.phase.icon} ${this.daynight.phase.label} ${this.daynight.clockText}${this.daynight.speed > 1 ? ` ×${this.daynight.speed}` : ''}`
+      : '';
+    // 小灯状态（阶段 6-⑥⑦）：多盏时显示"亮着几盏 / 共几盏"
+    const lampTag = this.lamp?.isOn ? `  |  🏮 灯亮 ${this.lamp.litCount}/${this.lamp.count}` : '';
     // 天气 + 生命档案计数（阶段 5-⑤⑥）
     const wx = CONFIG.weather?.enabled ? `  |  ${this.weather.summary}` : '';
     const arch = this.archive.count() > 0 ? `  |  📖 ${this.archive.count()}` : '';
     ctx.fillText(
-      `FPS ${this._curFps.toFixed(0)}  |  鱼 ${this.fishes.length}  龟 ${this.turtles.length}  食物 ${this.food.aliveCount}${extra ? '  |  ' + extra : ''}${dn}${wx}${arch}${this.paused ? '  |  ⏸ 已暂停' : ''}`,
+      `FPS ${this._curFps.toFixed(0)}  |  鱼 ${this.fishes.length}  龟 ${this.turtles.length}  食物 ${this.food.aliveCount}${extra ? '  |  ' + extra : ''}${dn}${lampTag}${wx}${arch}${this.paused ? '  |  ⏸ 已暂停' : ''}`,
       12, this.world.h - 12
     );
     ctx.restore();
@@ -1023,7 +1225,8 @@ class PondApp {
       'A         →  选品种面板（加鱼/龟/草）',
       'L         →  物种列表',
       'P         →  显示/隐藏植物',
-      'N         →  时间快进 ×25（看昼夜）',
+      'I         →  岸边小灯开关（也可以直接点灯）',
+      'N         →  时间快进 ×25（切到加速循环看昼夜）',
       'W         →  切换天气（晴/雨/雨后）',
       'O         →  生命档案（逝者纪念册）',
       'M         →  静音 / 开声音（首次会解锁音频）',
@@ -1032,8 +1235,13 @@ class PondApp {
       'Shift+S   →  导出存档 JSON 文件',
       'Shift+R   →  重新开始（清档，可撤销）',
       '',
-      '🌿 鱼吃饱繁殖鱼苗，龟上岸产蛋孵化',
+      '🌿 鱼吃饱繁殖鱼苗，龟上岸/晒台产蛋孵化',
       '📖 逝者留下遗骸（螺蛳清理），记入生命档案',
+      '🥣 饲料浮在水面（不下沉），鱼龟游上来吃',
+      '🏞 左右两侧是岸、中间是水，晒台在水中央',
+      '🕒 昼夜跟随电脑时间：白天亮、夜里黑',
+      '🏮 夜里太黑就点岸边的小灯（或按 I 一起开关）',
+      '🐢 龟的寿命已经拉长：能看着它们慢慢长大',
       '💾 关掉壁纸再打开，继续上次的水塘',
       '🔊 音效默认关闭，按 M 或到壁纸设置里开启',
     ];
@@ -1152,7 +1360,9 @@ window.addEventListener('DOMContentLoaded', () => {
     }, 2000);
   }
 
-  // URL 参数 ?t=0.85 → 直接跳到指定时刻（调试/分享用，0=黎明 0.3=白天 0.56=黄昏 0.85=夜晚）
+  // URL 参数 ?t=0.5 → 直接跳到指定时刻（调试/分享用）。
+  // t 就是"当天进度"，t×24 就是几点：0.2=04:48 / 0.5=12:00 正午 / 0.78=18:43 黄昏 / 0.9=21:36 夜晚。
+  // 跟随系统模式下这会临时脱档 5 分钟，之后自动回到电脑时间。
   const tParam = parseFloat(params.get('t'));
   if (!Number.isNaN(tParam) && window.pondApp.daynight) {
     window.pondApp.daynight.setDayT(Math.min(1, Math.max(0, tParam)));
@@ -1198,15 +1408,61 @@ window.addEventListener('DOMContentLoaded', () => {
       eggs: window.pondApp.eggs.length,
       caps: { fish: CONFIG.growth.fishCap, turtle: CONFIG.growth.turtleCap },
     }),
-    /** 昼夜时间：pond.time() → 当前时段/光强；pond.setTime(0.65) 跳到夜晚 */
+    /** 寿命/成长：pond.life() 看设置；pond.setLongevity(2) 寿命×2（立即生效） */
+    life: () => window.pondApp.lifeInfo(),
+    setLongevity: (v) => window.pondApp.setLongevity(v),
+    /** 地形/构图：pond.terrain() → 水线/池底/岸/晒台的位置、水域分段与岸坡角度 */
+    terrain: () => {
+      const W = window.pondApp.world;
+      const run = Math.max(1, W.waterLeftX);
+      const drop = W.surfaceAt(W.waterLeftX) - W.groundYAt(1);
+      return {
+        waterY: Math.round(W.waterY),
+        bedY: Math.round(W.bedY),
+        bankTopY: Math.round(W.bankTopY),
+        bankWidth: Math.round(W.bankSpan),
+        // 构图 / 坡度速查（阶段 6-⑨）：水线占画面多少、天空留白多少、岸坡多少度
+        waterPct: +(W.waterY / W.h).toFixed(3),
+        skyPct: +(W.bankTopY / W.h).toFixed(3),
+        bankAngleDeg: +((Math.atan2(drop, run) * 180) / Math.PI).toFixed(1),
+        waterSpans: W.waterSpans.map((s) => [Math.round(s.x0), Math.round(s.x1)]),
+        landZones: W.landZones.map((z) => ({
+          kind: z.kind, x0: Math.round(z.dx0), x1: Math.round(z.dx1),
+          topY: Math.round(W.groundYAt(z.mid)),
+        })),
+        platform: W.platform.on
+          ? { cx: Math.round(W.platform.cx), halfW: Math.round(W.platform.halfW), topY: Math.round(W.platform.topY) }
+          : null,
+      };
+    },
+    /** 昼夜时间：pond.time() → 当前时段/光强/钟点；pond.setTime(0.92) 跳到夜晚（22:05）
+     *  source: 'system' 跟随电脑时钟（默认），'cycle' 加速循环 */
     time: () => ({
       dayT: +window.pondApp.daynight.dayT.toFixed(3),
+      clock: window.pondApp.daynight.clockText,
       phase: window.pondApp.daynight.phase.label,
       icon: window.pondApp.daynight.phase.icon,
       light: +window.pondApp.daynight.light.toFixed(2),
+      ambient: +window.pondApp.ambientLight.toFixed(2),
+      source: window.pondApp.daynight.source,
       speed: window.pondApp.daynight.speed,
     }),
     setTime: (t) => window.pondApp.daynight.setDayT(t),
+    /** 切换时间来源：pond.setTimeSource('system' | 'cycle') */
+    setTimeSource: (s) => window.pondApp.daynight.setSource(s),
+    /** 岸边小灯：pond.lamp() → { on, lit, count, glow, lamps[] }；
+     *  pond.toggleLamp(true/false) 一起开关；pond.toggleLampAt(1) 单独开关第 2 盏 */
+    lamp: () => (window.pondApp.lamp ? {
+      on: window.pondApp.lamp.isOn,
+      lit: window.pondApp.lamp.litCount,
+      count: window.pondApp.lamp.count,
+      glow: +(window.pondApp.lamp.glow ?? 0).toFixed(2),
+      x: Math.round(window.pondApp.lamp.x ?? 0),
+      y: Math.round(window.pondApp.lamp.baseY ?? 0),
+      lamps: window.pondApp.lamp.list(),
+    } : { on: false, lit: 0, count: 0, glow: 0, x: 0, y: 0, lamps: [] }),
+    toggleLamp: (on) => window.pondApp.toggleLamp(on),
+    toggleLampAt: (i) => window.pondApp.toggleLampAt(i),
     /** 重建种群：pond.setPopulation({fish:{koi:5}, turtle:{redear:2}}) */
     setPopulation: (p) => window.pondApp.setPopulation(p),
     /** 投喂：pond.feed(x, y) */
@@ -1316,9 +1572,56 @@ window.livelyPropertyListener = function (name, val) {
     case 'daynightEnabled':
       CONFIG.daynight.enabled = !!val;
       break;
+    case 'daynightSource':
+      // 'system' 跟随电脑时钟（真实昼夜）/ 'cycle' 加速循环
+      if (CONFIG.daynight) CONFIG.daynight.source = val === 'cycle' ? 'cycle' : 'system';
+      if (app.daynight) app.daynight.setSource(val);
+      break;
     case 'dayLength':
       if (CONFIG.daynight) CONFIG.daynight.dayLength = val;
       if (app.daynight) app.daynight.dayLength = val;
+      break;
+    // ── 天体圆盘（阶段 6-⑨）：默认只留光线不画圆盘 ──────
+    case 'showSunDisc':
+      if (CONFIG.daynight) CONFIG.daynight.showSunDisc = !!val;
+      break;
+    case 'showMoonDisc':
+      if (CONFIG.daynight) CONFIG.daynight.showMoonDisc = !!val;
+      break;
+    case 'horizonGlow':
+      if (CONFIG.daynight) CONFIG.daynight.horizonGlow = !!val;
+      break;
+    // ── 岸边小灯（阶段 6-⑥）────────────────────────────
+    case 'lampEnabled':
+      if (CONFIG.lamp) CONFIG.lamp.enabled = !!val;
+      break;
+    case 'lampOn': {
+      const next = !!val;
+      const prev = app._lampSetting;
+      app._lampSetting = next;
+      if (CONFIG.lamp) CONFIG.lamp.on = next;
+      // 首次回调（= 壁纸刚加载）不动存档里的开关；用户真的改了设置才跟随
+      if (prev !== undefined && prev !== next && app.lamp) app.lamp.set(next);
+      break;
+    }
+    case 'lampBrightness':
+      if (CONFIG.lamp) CONFIG.lamp.brightness = val;
+      break;
+    case 'lampCount':
+      // 灯的数量：改完要重排灯组（新灯沿用当前总开关状态）
+      if (CONFIG.lamp) CONFIG.lamp.count = clamp(Math.round(val), 1, 5);
+      if (app.lamp) app.lamp.rebuild();
+      break;
+    case 'lampSpread':
+      // 灯群铺开范围：改完也要重排
+      if (CONFIG.lamp) CONFIG.lamp.spread = clamp(val, 0, 0.47);
+      if (app.lamp) app.lamp.rebuild();
+      break;
+    case 'lampRadius':
+      if (CONFIG.lamp) CONFIG.lamp.radius = clamp(val, 2, 16);
+      break;
+    case 'lampSoftness':
+      if (CONFIG.lamp) CONFIG.lamp.softness = clamp(val, 1.5, 9);
       break;
     case 'weatherEnabled':
       CONFIG.weather.enabled = !!val;
@@ -1339,6 +1642,10 @@ window.livelyPropertyListener = function (name, val) {
       break;
     case 'frogSound':
       CONFIG.audio.frogSound = !!val;
+      break;
+    // ── 寿命倍率（阶段 6-⑧）────────────────────────────
+    case 'longevity':
+      app.setLongevity(val);
       break;
 
     // ── 存档相关（阶段 6-①）────────────────────────────

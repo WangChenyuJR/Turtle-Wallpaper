@@ -14,19 +14,17 @@ export class Duckweed {
 
   reset(initial = false) {
     const W = this.world;
-    this.x = rand(0, W.w);
-    // 浮萍在水面偏上区域漂浮
-    const top = W.bankLineAt(this.x) + 8;
-    const bot = W.bankLineAt(this.x) + W.waterHeight * 0.55;
-    this.y = initial ? rand(top, bot) : top;
+    const s = W.waterSpans[Math.floor(Math.random() * W.waterSpans.length)] ?? { x0: 0, x1: W.w };
+    this.x = rand(s.x0 + 6, Math.max(s.x0 + 7, s.x1 - 6));
+    // 浮萍贴着水线漂（侧视下就是水面上的一个个小点）
+    this.y = W.surfaceAt(this.x) + (initial ? rand(0, 4) : 2);
     this.r = rand(CONFIG.duckweed.minSize, CONFIG.duckweed.maxSize);
     this.vx = rand(-1, 1) * CONFIG.duckweed.driftSpeed;
-    this.vy = rand(-0.4, 0.4) * CONFIG.duckweed.driftSpeed;
+    this.vy = 0;
     this.phase = rand(0, Math.PI * 2);
     this.rot = rand(0, Math.PI * 2);
     this.rotSpeed = rand(-0.15, 0.15);
     this.leafCount = randInt(2, 4);
-    // 每片小叶的不规则外形（不是清一色椭圆）
     const shp = blobShape(Math.random, 2, 0.14, 0.32);
     this.leafAmps = shp.amps;
     this.leafPhases = shp.phases;
@@ -38,7 +36,6 @@ export class Duckweed {
 
     // 缓慢漂移
     this.x += this.vx * dt;
-    this.y += this.vy * dt;
     this.rot += this.rotSpeed * dt;
 
     // 被生物推开
@@ -54,10 +51,14 @@ export class Duckweed {
       }
     }
 
-    // 边界回绕 + 限制在水面
-    if (this.x < -10) this.x = W.w + 10;
-    if (this.x > W.w + 10) this.x = -10;
-    this.y = clamp(this.y, W.bankLineAt(this.x) + 6, W.bankLineAt(this.x) + W.waterHeight * 0.6);
+    // 别漂出水面；贴回水线
+    if (!W.isWaterColumn(this.x)) {
+      this.x = W.nearWaterX(this.x);
+      this.vx *= -0.5;
+    }
+    this.x = clamp(this.x, 2, W.w - 2);
+    const sy = W.surfaceAt(this.x) + 2 + Math.sin(this.phase) * 1.0;
+    this.y += (sy - this.y) * Math.min(1, dt * 4);
 
     // 被水流轻微扰动
     this.x += Math.sin(this.phase) * 1.5 * dt;

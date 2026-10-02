@@ -28,8 +28,13 @@ export const SAVE_KEY = 'turtle-pond-state';
 const BAK_KEY = 'turtle-pond-state.bak';
 const TRASH_KEY = 'turtle-pond-state.trash';
 
-/** 存档格式版本：结构不兼容时 +1，旧档自动作废 */
-export const SCHEMA = 4;
+/**
+ * 存档格式版本：结构不兼容时 +1，旧档自动作废
+ *   v5（2026-10-02）：水塘从"俯视池面"改成"侧视剖面"——岸边挪到左右两侧、
+ *   中间加晒台、水面上方变成空气。所有实体坐标的语义都变了，旧档里的
+ *   x/y（按旧水面线记录）会落到空气里或岸里，故必须作废。
+ */
+export const SCHEMA = 5;
 
 const AUTOSAVE_INTERVAL = 30;      // 秒，节流自动存档
 
@@ -71,7 +76,11 @@ export class SaveManager {
         time: r3(a.daynight.time),
         speed: num(a.daynight.speed, 1),
         dayLength: num(a.daynight.dayLength, 480),
+        source: a.daynight.source === 'cycle' ? 'cycle' : 'system',
       },
+      // 岸边小灯（阶段 6-⑥⑦）：手动开关，关掉壁纸再打开还是上次那个状态
+      // ons = 每盏各自的开关（多盏时可以只开其中几盏）；旧档只有 on，读档走兜底
+      lamp: { on: !!a.lamp?.on, ons: a.lamp ? a.lamp.states() : undefined },
       weather: {
         state: a.weather.state,
         timer: r3(a.weather.timer),
@@ -284,7 +293,16 @@ export class SaveManager {
     return {
       savedAt: data.savedAt ? new Date(data.savedAt).toLocaleString() : '未知',
       playTime: `${Math.floor(mins / 60)}小时${mins % 60}分`,
-      dayT: data.daynight ? +(((data.daynight.time ?? 0) % (data.daynight.dayLength || 480)) / (data.daynight.dayLength || 480)).toFixed(2) : null,
+      // 昼夜：跟随电脑时钟时这档不存"时刻"，摘要里就不显示（免得误导）
+      timeSource: data.daynight?.source ?? 'system',
+      dayT: data.daynight && data.daynight.source !== 'system'
+        ? +(((data.daynight.time ?? 0) % (data.daynight.dayLength || 480)) / (data.daynight.dayLength || 480)).toFixed(2)
+        : null,
+      lamp: data.lamp
+        ? (Array.isArray(data.lamp.ons)
+            ? `${data.lamp.ons.filter(Boolean).length}/${data.lamp.ons.length} 盏亮`
+            : (data.lamp.on ? '亮' : '灭'))
+        : null,
       weather: data.weather?.state ?? null,
       fish: data.fishes?.length ?? 0,
       turtle: data.turtles?.length ?? 0,
@@ -458,6 +476,19 @@ function restoreWorld(app, data) {
     app.daynight.time = num(data.daynight.time, app.daynight.time);
     if (Number.isFinite(data.daynight.speed)) app.daynight.speed = data.daynight.speed;
     if (Number.isFinite(data.daynight.dayLength)) app.daynight.dayLength = data.daynight.dayLength;
+    // source 不从这里恢复：时间来源属于"壁纸设置"（Lively 面板），不归水塘状态管
+  }
+
+  // ── 岸边小灯（阶段 6-⑥⑦）────────────────────────────
+  // 旧档没有 lamp 字段 → 保持 CONFIG.lamp.on 的默认值
+  if (data.lamp && app.lamp) {
+    const ons = Array.isArray(data.lamp.ons) ? data.lamp.ons : null;
+    if (ons && ons.length === app.lamp.count) {
+      ons.forEach((v, i) => app.lamp.setAt(i, !!v));   // 多盏：逐盏恢复
+    } else {
+      app.lamp.on = !!data.lamp.on;                    // 旧档：整组一个开关
+    }
+    app.lamp.snapGlow();    // 读档即到位，别让灯慢慢亮起来
   }
 
   // ── 天气 ────────────────────────────────────────────

@@ -194,8 +194,13 @@ export class CreaturePanel {
     fishTop:    { scale: 0.46, cx: -0.19, cy: 0 },
   };
 
-  /** 把该个体（按它的 artSeed，与水塘里看到的一致）画进图鉴格子 */
+  /**
+   * 把该个体（按它的 artSeed，与水塘里看到的一致）画进图鉴格子
+   * @param {HTMLCanvasElement|string} canvas 画布元素，或面板内的选择器（如 '.cp-cv-top'）
+   */
   _setVector(canvas, inst, view) {
+    if (typeof canvas === 'string') canvas = this.el.querySelector(canvas);
+    if (!canvas) return;                            // 选择器没命中：静默跳过，别拖垮整个面板
     const ctx = canvas.getContext('2d');
     const W = canvas.width;
     ctx.clearRect(0, 0, W, canvas.height);
@@ -313,7 +318,7 @@ export class CreaturePanel {
     const parts = [];
     if (this._kind === 'turtle') {
       parts.push(`当前状态：<b>${TURTLE_STATE_CN[inst.state] ?? inst.state}</b>`);
-      parts.push(inst.y < this.app.world.bankY ? '水域' : '岸上');
+      parts.push(this.app.world.isWater(inst.x, inst.y) ? '水域' : '岸上');
     } else {
       const hunger = Math.round((inst.hunger ?? 0) * 100);
       parts.push(`当前状态：<b>${hunger > 60 ? '觅食中' : '游动中'}</b>`);

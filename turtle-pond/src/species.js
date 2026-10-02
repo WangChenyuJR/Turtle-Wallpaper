@@ -173,7 +173,7 @@ export const TURTLE_SPECIES = {
     sizeScale: 1.15,
     speedScale: 1.15,
     flat: true,
-    baskingChance: 0.06,
+    baskingChance: 0.14,     // 仍是最少上岸的品种，但保证看得见它晒壳
     baskDuration: [4, 8],
     waterBias: 2.2,
     weight: 1,
@@ -336,7 +336,7 @@ export const TURTLE_SPECIES = {
 
 // ── habitat 预设参数（品种未显式指定时采用）──────────────
 export const HABITAT_PRESETS = {
-  aquatic:     { baskingChance: 0.10, baskDuration: [4, 8],   landSpeedScale: 0.85, waterBias: 2.0 },
+  aquatic:     { baskingChance: 0.16, baskDuration: [4, 8],   landSpeedScale: 0.85, waterBias: 2.0 },
   semi:        { baskingChance: 0.45, baskDuration: [8, 16],  landSpeedScale: 1.0,  waterBias: 1.0 },
   terrestrial: { baskingChance: 0.85, baskDuration: [16, 34], landSpeedScale: 1.1,  waterBias: 0.3 },
   marsh:       { baskingChance: 0.15, baskDuration: [5, 11],  landSpeedScale: 0.9,  waterBias: 1.5 },

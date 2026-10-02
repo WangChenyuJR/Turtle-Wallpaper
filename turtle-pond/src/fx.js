@@ -89,17 +89,14 @@ export class FXLayer {
     const W = this.world;
     const g = ctx.createLinearGradient(0, W.bankLineAt(W.w * 0.5), 0, W.marshLineAt(W.w * 0.5));
     // 雾色偏水体本色（青绿），白天稍亮、夜晚更暗
-    const a = 0.16 * (0.55 + 0.45 * light);
-    g.addColorStop(0, `rgba(58,120,138,0)`);
-    g.addColorStop(0.45, `rgba(48,104,124,${(a * 0.45).toFixed(3)})`);
-    g.addColorStop(1, `rgba(34,72,92,${a.toFixed(3)})`);
+    // 阶段 5-⑭：浅塘能见度高 → 雾整体调淡（0.16→0.10），别把水底糊住
+    const a = 0.10 * (0.55 + 0.45 * light);
+    g.addColorStop(0, `rgba(78,148,168,0)`);
+    g.addColorStop(0.45, `rgba(64,132,156,${(a * 0.45).toFixed(3)})`);
+    g.addColorStop(1, `rgba(46,100,124,${a.toFixed(3)})`);
 
     ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(0, W.bankLineAt(0));
-    for (let x = 0; x <= W.w; x += 8) ctx.lineTo(x, W.bankLineAt(x));
-    for (let x = W.w; x >= 0; x -= 8) ctx.lineTo(x, W.marshLineAt(x));
-    ctx.closePath();
+    W._waterPath(ctx);
     ctx.fillStyle = g;
     ctx.fill();
     ctx.restore();
@@ -107,6 +104,13 @@ export class FXLayer {
 
   /**
    * ③ 水面焦散光斑 —— 在全球最后、色罩之前/之后均可（建议色罩之前）
+   *
+   * 观感基调（2026-10-02 调整）：不要"锐利贯穿的浅色横线"——
+   * 那太像扫描线。改成**宽而淡的柔光带**：
+   *   · 线宽加大 3~4 倍、alpha 减半 → 边缘不再扎眼
+   *   · setLineDash 断续 → 光带时隐时现，没有"一条线贯穿全宽"的几何感
+   *   · 虚线 offset 随时间漂移 → 光斑沿光带缓缓流动
+   *   · 波动幅度加大 → 近乎水平的直线被扭成自然水纹
    * @param {number} time 秒
    * @param {number} light 0~1 昼夜光强
    * @param {boolean} rain 是否下雨（雨天无强光斑）
@@ -115,20 +119,17 @@ export class FXLayer {
     if (!this.enabled || !(CONFIG.fx?.caustics ?? true)) return;
     if (light < 0.25) return;                 // 夜里几乎无光斑
     const W = this.world;
-    const baseA = (rain ? 0.03 : 0.075) * light;
+    const baseA = (rain ? 0.03 : 0.075) * light * 0.55;
 
     ctx.save();
-    // 只在水面区域叠加
-    ctx.beginPath();
-    ctx.moveTo(0, W.bankLineAt(0));
-    for (let x = 0; x <= W.w; x += 8) ctx.lineTo(x, W.bankLineAt(x));
-    for (let x = W.w; x >= 0; x -= 8) ctx.lineTo(x, W.marshLineAt(x));
-    ctx.closePath();
+    // 只在水面区域叠加（侧视剖面：多段水域共用一条路径）
+    W._waterPath(ctx);
     ctx.clip();
 
     const top = W.waterTop;
     const h = W.waterHeight;
     ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
 
     // 不等距光带 + 各自独立漂移/明暗（避免"等距扫描线"感）
     const bands = 11;
@@ -147,14 +148,19 @@ export class FXLayer {
       if (alpha < 0.008) continue;
 
       ctx.strokeStyle = `rgba(198,238,248,${alpha.toFixed(3)})`;
-      ctx.lineWidth = 1.4 + j1 * 1.8;
+      ctx.lineWidth = 5 + j1 * 3.5;            // 宽光带（替代 1.4~3.2 细线）
+      // 断续：段长/空隙/漂移速度都随 band 伪随机，且逐帧缓缓流动
+      const seg = 55 + j1 * 90;
+      const gap = 45 + j2 * 80;
+      ctx.setLineDash([seg, gap]);
+      ctx.lineDashOffset = -(time * (10 + b * 4) + b * 37);
       ctx.beginPath();
       let first = true;
       for (let x = -20; x <= W.w + 20; x += 12) {
         let off = 0;
         for (const w of this._waves) {
           off += Math.sin(x * w.fx + y0 * w.fy + time * w.sp * 3 + w.ph + b * 1.9)
-            * w.amp * 8.5;                     // 幅度加大，光带扭曲成水纹
+            * w.amp * 12;                      // 幅度加大，光带扭曲成水纹
         }
         const y = y0 + off + Math.sin((x + drift) * 0.007 + b) * 3.5;
         first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
@@ -162,6 +168,7 @@ export class FXLayer {
       }
       ctx.stroke();
     }
+    ctx.setLineDash([]);
     ctx.restore();
   }
 
@@ -175,40 +182,109 @@ export class FXLayer {
     const brightness = 0.5 + 0.5 * light;
 
     ctx.save();
-    // 1) 水面反光（半透明亮线，随光强呼吸）
+    // 1) 水面反光（半透明亮线，随光强呼吸）——只画在水线那一段
     ctx.globalAlpha = 0.30 * brightness;
     ctx.strokeStyle = '#dff4fb';
     ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.moveTo(0, W.bankLineAt(0));
-    for (let x = 0; x <= W.w; x += 10) {
-      ctx.lineTo(x, W.bankLineAt(x) + Math.sin(x * 0.02 + time * 1.1) * 1.6);
+    for (const s of W.waterSpans) {
+      let first = true;
+      for (let x = s.x0; x <= s.x1; x += 10) {
+        const y = W.surfaceAt(x) + Math.sin(x * 0.02 + time * 1.1) * 1.6;
+        first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        first = false;
+      }
     }
     ctx.stroke();
 
-    // 2) 紧贴其上的湿痕暗线（让岸线更有厚度）
+    // 2) 紧贴其上的湿痕暗线（让水线更有厚度）
     ctx.globalAlpha = 0.16 * brightness;
     ctx.strokeStyle = '#5c7d84';
     ctx.lineWidth = 1.0;
     ctx.beginPath();
-    ctx.moveTo(0, W.bankLineAt(0) - 1.4);
-    for (let x = 0; x <= W.w; x += 10) {
-      ctx.lineTo(x, W.bankLineAt(x) - 1.4 + Math.sin(x * 0.02 + time * 1.1 + 1.5) * 1.2);
+    for (const s of W.waterSpans) {
+      let first = true;
+      for (let x = s.x0; x <= s.x1; x += 10) {
+        const y = W.surfaceAt(x) - 1.4 + Math.sin(x * 0.02 + time * 1.1 + 1.5) * 1.2;
+        first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        first = false;
+      }
     }
     ctx.stroke();
 
-    // 3) 岸边零星泡沫点（贴岸线分布的小亮点，缓慢明灭）
+    // 3) 水线上零星泡沫点（缓慢明灭）
     ctx.globalAlpha = 0.18 * brightness;
     ctx.fillStyle = '#eaf7fb';
-    for (let i = 0; i < 40; i++) {
-      const x = ((i * 137.5) % W.w);
-      const y = W.bankLineAt(x) + Math.sin(i * 1.7) * 3;
-      const tw = 0.5 + 0.5 * Math.sin(time * 1.6 + i);
-      ctx.globalAlpha = 0.10 + tw * 0.16 * brightness;
-      ctx.beginPath();
-      ctx.arc(x, y, 0.9 + tw * 0.7, 0, Math.PI * 2);
-      ctx.fill();
+    for (const s of W.waterSpans) {
+      const n = Math.max(4, Math.round((s.x1 - s.x0) / 34));
+      for (let i = 0; i < n; i++) {
+        const x = s.x0 + ((i + 0.5) / n) * (s.x1 - s.x0);
+        const y = W.surfaceAt(x) + Math.sin(i * 1.7) * 3;
+        const tw = 0.5 + 0.5 * Math.sin(time * 1.6 + i);
+        ctx.globalAlpha = 0.10 + tw * 0.16 * brightness;
+        ctx.beginPath();
+        ctx.arc(x, y, 0.9 + tw * 0.7, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
+    ctx.restore();
+  }
+
+  /**
+   * ④ 水下浸没感（阶段 5-⑭）—— 让水下生物"被水盖住"
+   *
+   * 分三层：
+   *   a) 水面遮挡带：紧贴岸线下方一条水色厚带，压住靠近水面生物的顶部，
+   *      形成"从水面上方看下去"的遮挡关系（而不是生物浮在水面之上）。
+   *   b) 折射扭曲描边：在水面附近的水下部分叠一条轻微错位的暗边，
+   *      模拟水面折射把水下东西"错开一截"。
+   *   c) 深度水色罩：越深越被水色吞没（复用 depthFog 的色系）。
+   *
+   * 由主循环在"生物本体之后、浮叶之前"调用。
+   */
+  drawSubmerged(ctx, time, light = 1) {
+    if (!this.enabled || !(CONFIG.fx?.submerged ?? true)) return;
+    const W = this.world;
+    const topAt = (x) => W.surfaceAt(x);
+
+    ctx.save();
+    // 只作用在水体里（多段水域共用一条路径）
+    W._waterPath(ctx);
+    ctx.clip();
+
+    // ── a) 水面遮挡带：从水线往下一条厚约 26~34px 的水色带 ──
+    const bandW = 26 + 6 * Math.sin(time * 0.45);
+    ctx.beginPath();
+    for (const s of W.waterSpans) {
+      let first = true;
+      for (let x = s.x0; x <= s.x1; x += 8) {
+        const y = topAt(x);
+        first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        first = false;
+      }
+    }
+    ctx.strokeStyle = `rgba(74,143,168,${0.30 * (0.6 + 0.4 * light)})`;
+    ctx.lineWidth = bandW;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(96,168,190,${0.12 * (0.6 + 0.4 * light)})`;
+    ctx.lineWidth = bandW * 1.8;
+    ctx.stroke();
+
+    // ── b) 水面折射扭曲线（柔化：宽线减淡，别成一条锐利亮横线）──
+    ctx.beginPath();
+    for (const s of W.waterSpans) {
+      let first = true;
+      for (let x = s.x0; x <= s.x1; x += 7) {
+        const y = topAt(x) + 2.5 + Math.sin(x * 0.035 + time * 1.15) * 2.8;
+        first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        first = false;
+      }
+    }
+    ctx.strokeStyle = `rgba(180,226,240,${0.07 * (0.6 + 0.4 * light)})`;
+    ctx.lineWidth = 3.4;
+    ctx.stroke();
+
     ctx.restore();
   }
 }

@@ -21,9 +21,16 @@ export class Remains {
     this.world = world;
     this.kind = kind;               // 'fish' | 'turtle'
     this.size = size;
-    this.x = clamp(x, 12, world.w - 12);
-    // 水里沉到泥沼线上；岸上离世的（龟）留在原地
-    this.y = stayY ?? (world.marshLineAt(this.x) - rand(2, 8));
+    if (stayY == null) {
+      // 水里离世的：沉到池底（x 吸附到水域内）
+      const cx = world.nearWaterX(clamp(x, 12, world.w - 12));
+      this.x = cx;
+      this.y = world.groundYAt(cx) - rand(2, 8);
+    } else {
+      // 岸上离世的（龟）留在原地
+      this.x = clamp(x, 12, world.w - 12);
+      this.y = stayY;
+    }
     this.decay = 1;                 // 1 → 0
     this.phase = rand(0, Math.PI * 2);
     this.gone = false;
@@ -107,13 +114,17 @@ export class Snail {
 
   _place() {
     const W = this.world;
-    this.x = rand(W.w * 0.05, W.w * 0.95);
     if (this.zone === 'bank') {
-      // 岸边（贴近岸线）
-      this.y = W.bankLineAt(this.x) - rand(0, 10);
+      // 岸上（左右岸 / 晒台的干地）
+      const zones = W.landZones.length ? W.landZones : [{ dx0: 0, dx1: W.w }];
+      const z = zones[Math.floor(Math.random() * zones.length)];
+      this.x = rand(z.dx0, Math.max(z.dx0 + 1, z.dx1));
+      this.y = W.groundYAt(this.x) - rand(0, 8);
     } else {
-      // 水底（泥沼线上方一点点）
-      this.y = W.marshLineAt(this.x) - rand(2, 6);
+      // 池底（水域内）
+      const s = W.waterSpans[Math.floor(Math.random() * W.waterSpans.length)] ?? { x0: 0, x1: W.w };
+      this.x = rand(s.x0 + 8, Math.max(s.x0 + 9, s.x1 - 8));
+      this.y = W.groundYAt(this.x) - rand(2, 6);
     }
   }
 
@@ -164,10 +175,12 @@ export class Snail {
     // 按区域约束
     if (this.zone === 'bottom') {
       this.x = clamp(this.x, 8, W.w - 8);
-      this.y = W.marshLineAt(this.x) - rand(2, 5);   // 贴底
+      if (!W.isWaterColumn(this.x)) this.x = W.nearWaterX(this.x);
+      this.y += (W.groundYAt(this.x) - 3 - this.y) * Math.min(1, dt * 8);
     } else {
-      this.x = clamp(this.x, 8, W.w - 8);
-      this.y = clamp(this.y, 10, Math.max(12, W.bankLineAt(this.x) - 2));
+      // 岸上：吸附在最近的干地上慢慢爬
+      this.x = clamp(W.landX(this.x), 8, W.w - 8);
+      this.y += (W.groundYAt(this.x) - 3 - this.y) * Math.min(1, dt * 8);
     }
   }
 
@@ -366,9 +379,10 @@ export class ScavengerField {
    */
   update(dt, remains, foods) {
     const W = this.world;
-    const sunk = foods.filter((f) => !f.eaten && f.y > W.marshLineAt(f.x) - 26);
+    // 阶段 6-⑧：饲料改成浮面后不再是"沉底"，虾改成捡水里任何一颗没被吃掉的
+    const reachable = foods.filter((f) => !f.eaten && W.isWater(f.x, f.y));
     for (const s of this.snails) s.update(dt, remains);
-    for (const s of this.shrimps) s.update(dt, sunk);
+    for (const s of this.shrimps) s.update(dt, reachable);
     for (const r of remains) r.update(dt);
   }
 

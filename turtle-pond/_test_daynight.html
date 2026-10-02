@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>阶段5-④ 昼夜循环 测试（简化）</title>
+  <title>阶段6-⑥⑦⑨ 昼夜跟随系统时间 + 岸边小灯（高斯柔光多盏）+ 抬高水面 / 缓坡 / 不画日轮</title>
   <style>
     body { margin: 0; background: #123; color: #cfe; font-family: monospace; }
     #pond { display: block; opacity: 0.25; }
@@ -18,7 +18,13 @@
   <div id="report">运行中…</div>
   <script type="module" src="./src/main.js"></script>
   <script type="module">
-    import { DayNight } from './src/daynight.js';
+    // 说明：本页会在真实浏览器里跑，昼夜默认跟随电脑时间。
+    // 想看指定时刻就加载 _test_daynight.html?t=0.85（= 20:24 夜色）
+    import { DayNight, PHASES } from './src/daynight.js';
+    import { CONFIG } from './src/config.js';
+
+    const T = (h, m = 0) => (h * 3600 + m * 60) / 86400;
+    const LC = CONFIG.lamp;   // 灯参数短名字
 
     setTimeout(() => {
       const log = [];
@@ -28,44 +34,147 @@
       try {
         const app = window.pondApp;
 
-        // 1. 纯计算：时段/光强
-        const dn = new DayNight(0.2);
-        ok(dn.phase.id === 'day' && dn.light === 1, 'dayT=0.2 → 白天全亮');
-        dn.setDayT(0.8);
-        ok(dn.phase.id === 'night' && dn.isNight && dn.light < 0.3, 'dayT=0.8 → 夜晚暗光');
-        dn.setDayT(0.03);
-        ok(dn.phase.id === 'dawn' && dn.light > 0.55 && dn.light < 1, 'dayT=0.03 → 黎明过渡光');
-        dn.setDayT(0.56);
-        ok(dn.phase.id === 'dusk', 'dayT=0.56 → 黄昏');
+        // ── 1. 纯计算：真实钟点 → 时段 / 光强 / 钟点文本 ──
+        const dn = new DayNight();
+        ok(dn.source === 'system', `默认时间来源 = ${dn.source}（跟随电脑时钟）`);
+        const realDayT = (() => {
+          const d = new Date();
+          return (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) / 86400;
+        })();
+        ok(Math.abs(dn.dayT - realDayT) < 0.0003,
+          `dayT 与电脑时间一致 ${dn.dayT.toFixed(4)} ≈ ${realDayT.toFixed(4)}（现在是 ${dn.clockText}）`);
 
-        // 2. 场景集成
-        window.pond.setTime(0.9);          // 深夜
+        dn.setDayT(T(12, 0));
+        ok(dn.phase.id === 'day' && dn.light === 1, '12:00 → 白天全亮 1.00');
+        ok(dn.clockText === '12:00', `钟点文本 ${dn.clockText}`);
+
+        dn.setDayT(T(22, 0));
+        ok(dn.phase.id === 'night' && dn.isNight && dn.light < 0.3, '22:00 → 夜晚暗光 0.28');
+
+        dn.setDayT(T(2, 0));
+        ok(dn.phase.id === 'night' && dn.isNight, '02:00 → 也是夜晚（跨 0 点没判错）');
+
+        dn.setDayT(T(5, 30));
+        ok(dn.phase.id === 'dawn' && dn.light > 0.28 && dn.light < 1, `05:30 → 黎明过渡光 ${dn.light.toFixed(2)}`);
+
+        dn.setDayT(T(18, 20));
+        ok(dn.phase.id === 'dusk', `18:20 → 黄昏 ${dn.light.toFixed(2)}`);
+
+        dn.setDayT(T(6, 40));
+        ok(dn.phase.id === 'day' && dn.light > 0.99, '06:40 整 → 恰好进入白天（边界不错 1 秒）');
+
+        // ── 2. 时间源切换不跳变 + 加速循环仍可用 ──
+        const before = dn.dayT;
+        dn.setSource('cycle');
+        ok(Math.abs(dn.dayT - before) < 0.002, '切到 cycle 加速循环，画面不跳');
+        const t0 = dn.dayT;
+        for (let i = 0; i < 60; i++) dn.update(1);
+        ok(Math.abs(dn.dayT - ((t0 + 60 / dn.dayLength) % 1)) < 0.003,
+          `加速模式 60s 推进 → ${dn.dayT.toFixed(3)}`);
+        dn.setSource('system');
+
+        // ── 3. 场景集成（真实 app）：状态栏数值 + 鱼群夜间减速 ──
+        window.pond.setTime(T(23, 0));
         for (let i = 0; i < 30; i++) app._update(0.05, i * 0.05);
         const t1 = window.pond.time();
         log.push(`   pond.time() = ${JSON.stringify(t1)}`);
         ok(t1.phase === '夜晚' && t1.light < 0.3, 'pond.time() 夜晚状态正确');
-        ok(app.fishes.every(f => f.lightLevel < 1), '鱼收到夜晚减速信号');
+        ok(t1.clock && /^\d\d:\d\d$/.test(t1.clock), `状态栏钟点格式正确 ${t1.clock}`);
+        ok(app.fishes.every((f) => f.lightLevel < 1), '鱼收到夜晚减速信号');
 
-        // 3. 夜晚龟不上岸：清空重置，深水放两只半水龟跑 20 秒
-        window.pond.setPopulation({ fish: {}, turtle: { redear: 2 } });
+        // ── 4. 岸边小灯：开关 → 补光 → 夜色罩变淡 ──
+        const lamp = app.lamp;
+        ok(!!lamp, '岸边小灯已挂到场景上');
+        const g = lamp.geom();
+        log.push(`   灯位置 x=${g.x.toFixed(0)} 底座 y=${g.base.toFixed(0)} 高 ${g.h.toFixed(0)}px`);
+        ok(lamp.hitTest(g.x, g.bulbY), '点灯罩中心能命中（点击可开关）');
+        ok(!lamp.hitTest(g.x + g.h * 3, g.bulbY), '点远处不命中（不影响投喂）');
+
+        window.pond.toggleLamp(false);
+        for (let i = 0; i < 30; i++) app._update(0.05, i * 0.05);
+        const darkOff = app.ambientLight;
+        ok(Math.abs(darkOff - 0.28) < 0.02, `深夜关灯：环境光 ${darkOff.toFixed(2)}`);
+
+        window.pond.toggleLamp(true);
+        for (let i = 0; i < 60; i++) app._update(0.05, i * 0.05);
+        const darkOn = app.ambientLight;
+        ok(darkOn > darkOff + 0.1, `深夜开灯：环境光 ${darkOff.toFixed(2)} → ${darkOn.toFixed(2)}（水塘变亮）`);
+        ok(window.pond.lamp().on === true, 'pond.lamp() 报告灯已点亮');
+
+        // ── 4b. 多盏灯（阶段 6-⑦）：排布 / 单盏开关 / 高斯柔光参数 ──
+        let lamps = window.pond.lamp();
+        ok(lamps.count >= 2, `布了 ${lamps.count} 盏小灯（多盏柔光）`);
+        log.push(`   灯位 x = ${lamps.lamps.map((l) => l.x).join(' / ')}（高度 ${lamps.lamps.map((l) => l.h).join('/')}）`);
+        ok(lamps.lamps.every((l) => l.x > 0 && l.x < app.world.w), '每盏都在画面内');
+        ok(lamps.lamps.every((l) => Math.abs(l.y - app.world.bankLineAt(l.x)) < 1), '每盏都站在岸线上');
+
+        window.pond.toggleLamp(false);
+        window.pond.toggleLampAt(1);
+        for (let i = 0; i < 40; i++) app._update(0.05, i * 0.05);
+        lamps = window.pond.lamp();
+        ok(lamps.lit === 1 && lamps.on === true, `只点中间那盏 → ${lamps.lit}/${lamps.count} 亮，整组算"开着"`);
+        ok(app.ambientLight > 0.3, `单盏也能补光：环境光 ${app.ambientLight.toFixed(2)}`);
+        window.pond.toggleLamp(true);
+        for (let i = 0; i < 40; i++) app._update(0.05, i * 0.05);
+        ok(window.pond.lamp().lit === window.pond.lamp().count, 'toggleLamp(true) → 整组一起点亮');
+        ok(LC.count === window.pond.lamp().count, `CONFIG.lamp.count=${LC.count} 与场景一致`);
+        ok(LC.softness < 6 && LC.radius >= 5,
+          `柔光参数：半径 ${LC.radius}× 灯高、高斯陡度 k=${LC.softness}（越小越糊）`);
+
+        // 白天开灯不该把亮度顶上去
+        window.pond.setTime(T(12, 0));
+        for (let i = 0; i < 30; i++) app._update(0.05, i * 0.05);
+        ok(Math.abs(app.ambientLight - 1) < 0.01, '正午开灯：亮度仍为 1.00（不上溢）');
+        window.pond.toggleLamp(false);
+
+        // ── 4c. 构图与天光（阶段 6-⑨）：水线抬高 / 岸坡放缓 / 不画日轮 ──
+        {
+          const W = app.world;
+          const waterPct = W.waterY / W.h;
+          ok(Math.abs(waterPct - 0.27) < 0.03,
+            `水线抬到 ${(waterPct * 100).toFixed(1)}%（把画面上方让给水）`);
+          ok(W.bankTopY / W.h <= 0.23,
+            `天空留白 ${((W.bankTopY / W.h) * 100).toFixed(1)}%（不多留空气）`);
+
+          const dropAll = W.surfaceAt(W.waterLeftX) - W.groundYAt(1);
+          const angAll = (Math.atan2(dropAll, Math.max(1, W.waterLeftX)) * 180) / Math.PI;
+          ok(angAll <= 32, `岸坡整体 ${angAll.toFixed(1)}°（缓坡，龟爬得上）`);
+
+          const edge = W.waterLeftX;
+          let maxNear = 0;
+          for (let x = Math.max(2, edge - 40); x < edge; x += 2) {
+            const dy = W.groundYAt(x + 2) - W.groundYAt(x);
+            maxNear = Math.max(maxNear, (Math.abs(Math.atan2(dy, 2)) * 180) / Math.PI);
+          }
+          ok(maxNear <= 46, `水线附近最陡 ${maxNear.toFixed(0)}°（就是龟上岸那一段）`);
+          log.push(`   水线 y=${W.waterY} 岸顶 y=${W.bankTopY} 岸线 x=${edge} 池底 y=${W.bedY}`);
+
+          ok(CONFIG.daynight.showSunDisc === false, '默认不画太阳圆盘（只留光线变化）');
+          ok(CONFIG.daynight.showMoonDisc === false, '默认不画月亮圆盘（只留月晕）');
+          ok(CONFIG.daynight.horizonGlow !== false, '地平线霞光开启（光从哪边来仍看得出来）');
+        }
+
+        // ── 5. 夜晚龟不上岸 + 白天恢复活跃 ──
+        window.pond.setTime(T(23, 30));
+        window.pond.setPopulation({ fish: { crucian: 3 }, turtle: { redear: 2 } });
         for (const t of app.turtles) { t.state = 'swim'; t.decisionTimer = 0.1; }
         for (let i = 0; i < 400; i++) app._update(0.05, i * 0.05);
-        const basking = app.turtles.filter(t => t.state === 'bask').length;
+        const basking = app.turtles.filter((t) => t.state === 'bask').length;
         ok(basking === 0, `夜晚无龟上岸晒背（bask=${basking}）`);
 
-        // 4. 白天恢复活跃
-        window.pond.setTime(0.3);
+        window.pond.setTime(T(12, 0));
         for (let i = 0; i < 400; i++) app._update(0.05, 100 + i * 0.05);
         const lightDay = app.fishes[0]?.lightLevel ?? 1;
         ok(lightDay === 1, '白天鱼活跃度恢复');
 
-        // 5. 长跑稳定性
+        // ── 6. 长跑稳定性 ──
         let crashed = false;
         try { for (let i = 0; i < 600; i++) app._update(0.05, 200 + i * 0.05); }
         catch (e) { crashed = true; log.push(e.message); }
-        ok(!crashed && app.fishes.every(f => isFinite(f.x)), '长跑 30s 无异常');
+        ok(!crashed && app.fishes.every((f) => isFinite(f.x)), '长跑 30s 无异常');
 
         log.push('');
+        log.push(`时段表：${PHASES.map((p) => p.label).join(' / ')}`);
         log.push(`—— 结果：${pass} 通过 / ${fail} 失败 ——`);
       } catch (err) {
         log.push('❌ 异常: ' + err.message);

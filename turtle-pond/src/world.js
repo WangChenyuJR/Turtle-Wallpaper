@@ -1,42 +1,63 @@
 /**
- * 场景世界 —— 岸边区 / 水面区 / 泥沼区 三区划分与渲染
+ * 场景世界 —— 侧视剖面（阶段 6-⑧ 重制）
  *
  * 坐标系：左上角 (0,0)，y 向下为正
  *
- *  ┌──────────────────────────────┐  y = 0
- *  │        岸边区（沙 + 草）        │
- *  ├──────────────────────────────┤  y = bankY   ← 岸线
- *  │                              │
- *  │        水面区（乌龟+鱼）        │
- *  │                              │
- *  ├──────────────────────────────┤  y = marshY  ← 泥沼线
- *  │        泥沼区（浑浊泥）         │
- *  └──────────────────────────────┘  y = height
+ *  ┌──────────────────────────────────────────────┐ y = 0
+ *  │              空气（天空 / 昼夜）                │
+ *  │  ▒▒岸▒▒      ← 荷叶浮在这条线上 →      ▒▒岸▒▒ │
+ *  ╞══════════════════════════════════════════════╡ y = waterY ← 水线
+ *  │              水体（鱼 / 潜水的龟）             │
+ *  │                   ▓晒台▓                      │
+ *  ├──────────────────────────────────────────────┤ y = bedY   ← 池底
+ *  │              淤泥 / 沉积 / 螺蛳                │
+ *  └──────────────────────────────────────────────┘ y = height
+ *
+ * 关键：整场地形由**一条地表曲线** `groundYAt(x)` 描述 ——
+ *   · 左右两侧地表高于水线  → 那部分就是「岸」
+ *   · 池心地表低于水线      → 那是「池底」
+ *   · 池中央再隆起一块露出水面的台地 → 「晒台」
+ * 而「水」= 地表在水线以下的那部分区域。
+ *
+ * 对外保留旧方法名（bankLineAt / isWater / isBank / constrainToWater …），
+ * 语义按新地形重解释，其它模块不用大改：
+ *   bankLineAt(x)  = min(水线, 地表) → 池中是水线、岸上是地表（"水面/地面的上边界"）
+ *   marshLineAt(x) = groundYAt(x)   → 池中是池底、岸上是地表
+ *   isBank(x,y)    = isLand(x,y)    → 站在干地上
  */
-
 import { CONFIG } from './config.js';
 import { rand, randInt, clamp, blobShape, blobPath } from './utils.js';
 import { WaterWaveField } from './waterwave.js';
 import { makePondTextures, tileTexture } from './terrain-tex.js';
 
+const smoothstep = (t) => {
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return t * t * (3 - 2 * t);
+};
+
+/** 地形扫描步长（px）：用来找"哪些列是水 / 哪些列是陆" */
+const SCAN_STEP = 2;
+
 export class World {
   constructor(width, height) {
+    this.tex = null;
+    this._texReady = false;
+    this._decorReady = false;
+    this.w = width; this.h = height;
     this.resize(width, height);
-    this._buildTerrain();
-    this._buildRipples();
+
     // 真实波动方程水场（阶段 5-⑪）：逐帧求解 2D 波动方程，波与波真实干涉
-    // 手感参数（阻尼 / 环境微扰）全部从 CONFIG.natural 读取，改 config 即可调
     const nat = CONFIG.natural ?? {};
     this.wave = new WaterWaveField(width, height, nat.waveCell ?? 7, {
       damping: nat.waveDamping ?? 0.985,
       ambientGap: nat.waveAmbientGap ?? 0.35,
       ambientStr: nat.waveAmbientStr ?? 0.09,
     });
-    // 只有水面区域才允许环境微扰（岸上不波动）
+    // 只有水面区域才允许环境微扰（岸上/池底不波动）
     this.wave.ambientFilter = (x, y) => this.isWater(x, y);
-    // 程序化地表纹理（泥/沙/淤积），首次渲染惰性生成
-    this.tex = null;
-    this._texReady = false;
+
+    this._buildTerrain();
+    this._buildRipples();
   }
 
   /** 惰性生成程序纹理（首次渲染时调用，避免拖慢构造 / 无 DOM 测试环境降级） */
@@ -50,110 +71,446 @@ export class World {
     this._texReady = true;
   }
 
+  // ════════════════════════════════════════════════════════
+  //  几 何
+  // ════════════════════════════════════════════════════════
   resize(width, height) {
     this.w = width;
     this.h = height;
-    this.bankY = Math.round(height * CONFIG.layout.bankRatio);
-    this.marshY = Math.round(height * (1 - CONFIG.layout.marshRatio));
-    this.waterTop = this.bankY;
-    this.waterBottom = this.marshY;
-    this.waterHeight = this.marshY - this.bankY;
+    const L = CONFIG.layout ?? {};
+    const noiseStep = 8;   // 起伏噪声的采样间隔（px）
 
-    // 岸线起伏（让边界自然，不是一条直线）
-    this.bankProfile = [];
-    this.marshProfile = [];
-    const seg = 40;
-    for (let i = 0; i <= seg; i++) {
-      this.bankProfile.push(rand(-7, 7));
-      this.marshProfile.push(rand(-6, 6));
+    // ── 关键高度 ───────────────────────────────────────
+    this.waterY = Math.round(height * (L.waterY ?? 0.34));        // 水线
+    this.bedY = Math.round(height * (L.bedY ?? 0.82));            // 池底
+    this.bankTopY = Math.round(height * (L.bankTopY ?? 0.15));    // 岸顶地表
+    // 兜底：水线必须在岸顶之下、池底之上
+    this.waterY = clamp(this.waterY, this.bankTopY + 40, height - 60);
+    this.bedY = clamp(this.bedY, this.waterY + 50, height - 30);
+
+    // 兼容旧字段
+    this.bankY = this.waterY;          // 天空高度（= 水线）
+    this.marshY = this.bedY;
+    this.waterTop = this.waterY;
+    this.waterBottom = this.bedY;
+    this.waterHeight = Math.max(1, this.bedY - this.waterY);
+
+    // ── 岸坡控制点（t = 从屏幕边缘算起，占 bankSpan 的比例）──
+    // 阶段 6-⑨：从"岸顶→陡岸线→陡池壁"改成"缓台→缓坡入水→浅滩→池壁"，
+    // 目的是把**水线上下各留一段缓坡**——龟爬上岸不必翻一道坎，
+    // 视觉上也是真实河岸（近岸一大片浅水）。各段比例见 CONFIG.layout.bank。
+    const BK = L.bank ?? {};
+    const wY = this.waterY, bY = this.bedY;
+    const sr = clamp(L.shoreRatio ?? 0.4, 0.12, 0.92);
+    this.shoreRatio = sr;
+    const minRun = clamp(BK.minRun ?? 2.2, 1, 6);   // 坡的"缓"下限 = 水平跨度 ÷ 落差
+
+    // 岸坡横向跨度：按画面宽给（上限 w×0.46，免得两岸各自铺开把水面挤没）
+    this.bankSpan = clamp(Math.max(70, this.w * (L.bankSpan ?? 0.24)), 70, this.w * 0.46);
+
+    // 落差还要服从"缓坡"约束：落差 ≤ 可用水平跨度(sr×bankSpan) ÷ minRun。
+    // 竖屏（如 1000×1400）宽度不够摊开一条缓坡时，这里会自动压低岸顶、
+    // 让出一点天空 —— 宁可天空多留一点，也不做一道竖直的坎给龟爬。
+    const maxDrop = (sr * this.bankSpan) / minRun;
+    const drop = Math.min(Math.max(24, wY - this.bankTopY), Math.max(24, maxDrop));
+    this.bankTopY = Math.round(wY - drop);
+
+    const tY = this.bankTopY;
+    const shelfSpan = clamp(BK.shelfRatio ?? 0.58, 0.2, 0.95) * sr;
+    this._bankPts = [
+      { t: 0, y: tY },
+      { t: shelfSpan, y: tY + (wY - tY) * (BK.shelfDrop ?? 0.15) }, // 岸顶缓台
+      { t: sr, y: wY },                                             // 岸线（正好落在水线）
+      // ── 水下：先一大段浅滩（缓），再折向池壁 ──
+      { t: sr + (1 - sr) * (BK.shoalSpan ?? 0.34), y: wY + (bY - wY) * (BK.shoalDrop ?? 0.13) },
+      { t: sr + (1 - sr) * (BK.wallSpan ?? 0.66), y: wY + (bY - wY) * (BK.wallDrop ?? 0.55) },
+      { t: 1, y: bY },                                              // 池底
+    ];
+
+    // ── 晒台 ──────────────────────────────────────────
+    const P = L.platform ?? {};
+    const pfOn = P.enabled !== false;
+    const halfW = Math.max(24, this.w * (P.width ?? 0.15) / 2);
+    this.platform = {
+      on: pfOn,
+      cx: this.w * (P.x ?? 0.5),
+      halfW,
+      topY: Math.min(this.waterY - 16, height * (P.topY ?? 0.235)),
+    };
+    this.platform.on = pfOn && this.platform.topY < this.waterY - 8;
+
+    // ── 起伏噪声（一次生成、反复采样 → 地形稳定不抖动）──
+    this._noiseN = Math.ceil(width / noiseStep) + 2;
+    this._noise = new Float32Array(this._noiseN);
+    this._noise2 = new Float32Array(this._noiseN);
+    for (let i = 0; i < this._noiseN; i++) {
+      this._noise[i] = Math.random() * 2 - 1;
+      this._noise2[i] = Math.random() * 2 - 1;
     }
-    this.seg = seg;
+    this._noiseStep = noiseStep;
+
+    this._scanSpans();
 
     // 纹理密度依赖尺寸，resize 需重建（构造时会再调一次，幂等）
-    if (this.grassTufts) this._buildTerrain();
+    if (this._decorReady) this._buildTerrain();
     // 波场网格依赖尺寸
     if (this.wave) this.wave.resize(width, height);
   }
 
-  /** 岸线 y（带起伏），x 为像素 */
-  bankLineAt(x) {
-    return this.bankY + this._sample(this.bankProfile, x);
-  }
-
-  /** 泥沼线 y（带起伏） */
-  marshLineAt(x) {
-    return this.marshY + this._sample(this.marshProfile, x);
-  }
-
-  _sample(profile, x) {
-    const t = clamp(x / this.w, 0, 1) * this.seg;
+  _noiseAt(x, seed = 0) {
+    const arr = seed ? this._noise2 : this._noise;
+    const t = clamp(x / this._noiseStep, 0, this._noiseN - 1.001);
     const i = Math.floor(t);
     const f = t - i;
-    const a = profile[i] ?? 0;
-    const b = profile[Math.min(i + 1, this.seg)] ?? 0;
+    const a = arr[i], b = arr[Math.min(i + 1, this._noiseN - 1)];
     return a + (b - a) * f;
+  }
+
+  /** 岸坡地表：u = 距屏幕边缘的距离 / bankSpan（0 = 边缘，1 = 岸坡末端） */
+  _bankProfileY(u) {
+    u = clamp(u, 0, 1);
+    const pts = this._bankPts;
+    let i = 0;
+    while (i < pts.length - 2 && u > pts[i + 1].t) i++;
+    const a = pts[i], b = pts[i + 1];
+    const span = Math.max(1e-6, b.t - a.t);
+    const t = clamp((u - a.t) / span, 0, 1);
+    return a.y + (b.y - a.y) * smoothstep(t);
+  }
+
+  /**
+   * 地表高度（整场地形就靠这一条曲线）
+   *   · 靠边 → 岸坡（高于水线）
+   *   · 中间 → 池底（低于水线）
+   *   · 晒台范围内取更"高"的那个面
+   */
+  groundYAt(x) {
+    const bump = CONFIG.layout?.hump ?? 4;
+    const n = this._noiseAt(x);
+    let y;
+    if (x <= this.bankSpan) {
+      y = this._bankProfileY(x / this.bankSpan) + n * bump * 0.5;
+    } else if (x >= this.w - this.bankSpan) {
+      y = this._bankProfileY((this.w - x) / this.bankSpan) + n * bump * 0.5;
+    } else {
+      y = this.bedY + n * bump;
+    }
+    const p = this.platform;
+    if (p.on) {
+      const d = Math.abs(x - p.cx) / p.halfW;
+      if (d < 1) {
+        // 台面平坦（d<0.58），边缘缓降到池底
+        const e = d < 0.58 ? 1 : 1 - smoothstep((d - 0.58) / 0.42);
+        const floor = this.bedY + n * bump;
+        const py = floor + (p.topY - floor) * e + (e > 0.9 ? n * 1.4 : 0);
+        if (py < y) y = py;
+      }
+    }
+    return y;
+  }
+
+  /**
+   * 水线（略起伏，不是一条死直线）
+   *
+   * ⚠️ 这里必须和地表用**同一组噪声**（seed 0），不能用独立的一路：
+   * 岸线附近两者数值很接近，同相噪声会互相抵消，水陆边界才是干净的一条线。
+   * 若各用各的随机起伏，"水缘外侧第一块陆地"会随机地高出水线几十像素
+   * —— 岸坡越缓越明显（2026-10-02 阶段 6-⑨ 把坡放缓后踩到：
+   * `shorePointNear` 的落点飘到水线上方 48px，`_diag_sideview` 直接抓出来）。
+   */
+  surfaceAt(x) {
+    const amp = (CONFIG.layout?.hump ?? 4) * 0.55;
+    return this.waterY + this._noiseAt(x) * amp;
+  }
+
+  /** 上边界 = min(水线, 地表)：池中是水线，岸上是地表 */
+  bankLineAt(x) { return Math.min(this.surfaceAt(x), this.groundYAt(x)); }
+
+  /** 下边界 = 地表：池中是池底，岸上是地表 */
+  marshLineAt(x) { return this.groundYAt(x); }
+
+  /** 扫描出"哪些列是水 / 哪些列是陆"，并算出可站的干地范围 */
+  _scanSpans() {
+    const spans = [];
+    let cur = null;
+    const n = Math.floor(this.w / SCAN_STEP);
+    for (let i = 0; i <= n; i++) {
+      const x = Math.min(this.w, i * SCAN_STEP);
+      const isW = this.groundYAt(x) > this.surfaceAt(x) + 2;
+      if (isW) {
+        if (!cur) cur = { x0: x, x1: x };
+        else cur.x1 = x;
+      } else if (cur) {
+        spans.push(cur); cur = null;
+      }
+    }
+    if (cur) spans.push(cur);
+    this.waterSpans = spans.filter((s) => s.x1 - s.x0 >= 10);
+    if (!this.waterSpans.length) this.waterSpans = [{ x0: this.w * 0.5 - 1, x1: this.w * 0.5 + 1 }];
+    this.waterLeftX = this.waterSpans[0].x0;
+    this.waterRightX = this.waterSpans[this.waterSpans.length - 1].x1;
+
+    // 陆地 = 水列的补集；再切出"干地子段"（地表高出水线 dryBand 以上）
+    const dryBand = CONFIG.layout?.dryBand ?? 18;
+    const zones = [];
+    let px = 0;
+    for (const s of this.waterSpans) {
+      if (s.x0 - px > 8) zones.push({ x0: px, x1: s.x0 });
+      px = s.x1;
+    }
+    if (this.w - px > 8) zones.push({ x0: px, x1: this.w });
+    for (const z of zones) {
+      let d0 = null, d1 = null;
+      for (let x = z.x0; x <= z.x1; x += SCAN_STEP) {
+        if (this.surfaceAt(x) - this.groundYAt(x) >= dryBand) {
+          if (d0 === null) d0 = x;
+          d1 = x;
+        }
+      }
+      if (d0 === null) { d0 = z.x0; d1 = z.x1; }
+      z.dx0 = d0; z.dx1 = d1;
+      z.mid = (d0 + d1) / 2;
+      // 台地 / 岸 的区分（晒台在池中央，左右岸靠边）
+      z.kind = (z.dx0 > this.w * 0.25 && z.dx1 < this.w * 0.75) ? 'platform' : 'bank';
+    }
+    this.landZones = zones;
+  }
+
+  /** 某列是否有水 */
+  isWaterColumn(x) {
+    return this.groundYAt(x) > this.surfaceAt(x) + 2;
   }
 
   /** 判断点是否在水面可游区域 */
   isWater(x, y) {
-    return y > this.bankLineAt(x) + 6 && y < this.marshLineAt(x) - 6;
+    if (x < 0 || x > this.w || y < 0 || y > this.h) return false;
+    const s = this.surfaceAt(x);
+    const g = this.groundYAt(x);
+    if (g <= s + 2) return false;         // 该列地表在水线之上 → 没有水
+    // 上边界留 3px：浮在水面的饲料（水线下 ~4px）也算在水里，鱼龟才吃得到
+    return y > s + 3 && y < g - 4;
   }
 
-  /** 判断点是否在岸边（陆地） */
-  isBank(x, y) {
-    return y <= this.bankLineAt(x) + 6;
+  /**
+   * 判断点是否"站在干地上"（岸 / 晒台）。
+   * 容差 TOL 是为了让龟的"身体中心"（比脚高一点）也算踩在地上。
+   */
+  isLand(x, y) {
+    const g = this.groundYAt(x);
+    if (g > this.surfaceAt(x) - 1) return false;   // 该列是水（地表在水下）
+    const TOL = 28;
+    return y >= g - TOL && y <= g + 26;
   }
 
-  /** 判断点是否在泥沼 */
-  isMarsh(x, y) {
-    return y >= this.marshLineAt(x) - 6;
-  }
+  /** 旧名兼容：岸边 = 干地 */
+  isBank(x, y) { return this.isLand(x, y); }
+
+  /** 是否在池底的淤泥里（地表之下） */
+  isMarsh(x, y) { return y >= this.groundYAt(x) - 4; }
 
   /** 把点约束到水面区域内（返回的点保证仍落在 isWater 范围内） */
   constrainToWater(x, y, margin = 8) {
-    // margin 至少留出 8px：isWater 用的是 ±6 的内缩带，
-    // 若 margin 比它小（小龟体型×0.4 可能只有 5px），约束后反而会落回岸上/泥沼，
-    // 生物就会在边界上来回卡住。
     const m = Math.max(8, margin);
-    const cx = clamp(x, m, this.w - m);
-    const top = this.bankLineAt(cx) + m;
-    const bot = this.marshLineAt(cx) - m;
-    return { x: cx, y: clamp(y, top, Math.max(top, bot)) };
+    let cx = clamp(x, m, this.w - m);
+    // ① 找最近的水域横向区段
+    let span = this.waterSpans[0];
+    let bd = Infinity;
+    for (const s of this.waterSpans) {
+      const lo = s.x0 + m, hi = s.x1 - m;
+      if (hi <= lo) continue;
+      const d = cx < lo ? lo - cx : cx > hi ? cx - hi : 0;
+      if (d < bd) { bd = d; span = s; }
+    }
+    cx = clamp(cx, span.x0 + m, Math.max(span.x0 + m, span.x1 - m));
+
+    // ② 靠岸的水太薄（放不下 margin）→ 往池心挪，直到这一列的水够厚
+    const need = m * 2 + 10;
+    const mid = (span.x0 + span.x1) / 2;
+    const dir = cx < mid ? 1 : -1;
+    let guard = 0;
+    while (guard++ < 80 && this.groundYAt(cx) - this.surfaceAt(cx) < need) {
+      const nx = cx + dir * 8;
+      if (nx <= span.x0 || nx >= span.x1) break;
+      cx = nx;
+    }
+    cx = clamp(cx, 1, this.w - 1);
+
+    const top = this.surfaceAt(cx) + m;
+    const bot = this.groundYAt(cx) - Math.max(6, m * 0.6);
+    let cy = clamp(y, top, Math.max(top, bot));
+    // ③ 兜底：真出现"水太薄"的极端情况，也别吐出一个不在水里的点
+    if (!(this.groundYAt(cx) - this.surfaceAt(cx) > 12)) {
+      cx = clamp(mid, 1, this.w - 1);
+      const t2 = this.surfaceAt(cx) + 8;
+      const b2 = this.groundYAt(cx) - 6;
+      cy = clamp(cy, t2, Math.max(t2, b2));
+    }
+    return { x: cx, y: cy };
   }
 
+  /**
+   * 该列是不是陆地（地表露出水面）。
+   * 必须是 isWaterColumn 的严格补集：否则水陆之间会留出一条"既不算水也不算陆"
+   * 的窄过渡带，龟游到水缘就卡在里面出不来（2026-10-02 修复）。
+   */
+  isLandColumn(x) { return !this.isWaterColumn(x); }
+
+  /** 最近一段岸线的点（龟上岸时先游到这儿）——必须落在真正的陆地列上 */
+  shorePointNear(x) {
+    let bestX = this.waterLeftX, bd = Infinity, dir = -1;
+    for (const s of this.waterSpans) {
+      // 左缘 x0：外侧（陆地）在左 → dir=-1；右缘 x1：外侧在右 → dir=+1
+      for (const e of [{ x: s.x0, d: -1 }, { x: s.x1, d: 1 }]) {
+        const d = Math.abs(x - e.x);
+        if (d < bd) { bd = d; bestX = e.x; dir = e.d; }
+      }
+    }
+    // 水缘可能落在水陆过渡带上 → 向外一步步挪到真正的陆列，龟才踩得上去
+    let sx = bestX;
+    let guard = 0;
+    while (guard++ < 60 && sx > 1 && sx < this.w - 1 && !this.isLandColumn(sx)) sx += dir * 2;
+    sx = clamp(sx, 2, this.w - 2);
+    let sy = this.surfaceAt(sx) + 8;
+    if (this.isLandColumn(sx) || this.isLand(sx, sy)) {
+      // 登岸点必须**贴在水线附近**：晒台侧壁 / 陡岸那种近乎垂直的边缘，
+      // 水缘外侧两像素处地表就已经高出水线几十像素（阶段 6-⑨ 实测 1000×1400
+      // 下飘到 43px），不夹住的话龟会从水里"瞬移"到台顶。
+      const cap = CONFIG.layout?.shoreMaxRise ?? 22;
+      const surf = this.surfaceAt(sx);
+      sy = clamp(this.groundYAt(sx), surf - cap, surf + cap);
+    }
+    return { x: sx, y: sy };
+  }
+
+  /** 最近的"入水点"（在岸上想回水里时用）：水域边缘稍往里 */
+  waterEntryNear(x) {
+    let bestX = this.w * 0.5, bd = Infinity;
+    for (const s of this.waterSpans) {
+      const cands = [
+        { e: s.x0, inner: s.x0 + Math.max(14, (s.x1 - s.x0) * 0.12) },
+        { e: s.x1, inner: s.x1 - Math.max(14, (s.x1 - s.x0) * 0.12) },
+      ];
+      for (const c of cands) {
+        const d = Math.abs(x - c.e);
+        if (d < bd) { bd = d; bestX = c.inner; }
+      }
+    }
+    const wxp = clamp(bestX, 2, this.w - 2);
+    return { x: wxp, y: this.surfaceAt(wxp) + 20 };
+  }
+
+  /**
+   * 挑一个岸上落点（龟晒背 / 产蛋 / 上岸爬行用）
+   * @param {number} x 参考位置（离谁近优先）
+   * @param {boolean} [preferNear=true] true = 就近；false = 全局随机（换岸玩）
+   */
+  /** 某块陆地所属的 zone（x 落在 [x0, x1] 内）*/
+  landZoneAt(x) {
+    for (const z of this.landZones) if (x >= z.x0 && x <= z.x1) return z;
+    return null;
+  }
+
+  /** 在指定的某块陆地（岸/晒台）里随机取一个落点 */
+  pickLandSpotInZone(z) {
+    if (!z) return null;
+    const pad = Math.min(14, (z.dx1 - z.dx0) * 0.3);
+    const tx = rand(z.dx0 + pad, Math.max(z.dx0 + pad + 1, z.dx1 - pad));
+    return { x: tx, y: this.groundYAt(tx), zone: z };
+  }
+
+  pickLandSpot(x, preferNear = true) {
+    const zones = this.landZones;
+    if (!zones.length) return null;
+    let z;
+    if (preferNear) {
+      let bd = Infinity; z = zones[0];
+      for (const c of zones) {
+        const d = Math.abs(c.mid - x);
+        if (d < bd) { bd = d; z = c; }
+      }
+    } else {
+      z = zones[Math.floor(Math.random() * zones.length)];
+    }
+    return this.pickLandSpotInZone(z);
+  }
+
+  /** 某个 x 是否在干地上（不含容差），摆放装饰时用 */
+  isDryColumn(x) {
+    return this.surfaceAt(x) - this.groundYAt(x) >= (CONFIG.layout?.dryBand ?? 18);
+  }
+
+  /** 把 x 吸附到最近的干地（小灯/岸边小物件用） */
+  landX(x) {
+    if (this.isDryColumn(x)) return x;
+    const zones = this.landZones;
+    if (!zones.length) return x;
+    let best = zones[0], bd = Infinity;
+    for (const z of zones) {
+      const lo = z.dx0, hi = z.dx1;
+      const d = x < lo ? lo - x : x > hi ? x - hi : 0;
+      if (d < bd) { bd = d; best = z; }
+    }
+    return clamp(x, best.dx0, Math.max(best.dx0, best.dx1));
+  }
+
+  /** 把 x 吸附到水面里（倒影之类的水面物件用） */
+  nearWaterX(x) {
+    const m = 6;
+    let cx = clamp(x, m, this.w - m);
+    let span = this.waterSpans[0], bd = Infinity;
+    for (const s of this.waterSpans) {
+      const lo = s.x0 + m, hi = s.x1 - m;
+      if (hi <= lo) continue;
+      const d = cx < lo ? lo - cx : cx > hi ? cx - hi : 0;
+      if (d < bd) { bd = d; span = s; }
+    }
+    return clamp(cx, span.x0 + m, Math.max(span.x0 + m, span.x1 - m));
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  装 饰 物（草/石/卵石/气泡/淤泥…）
+  // ════════════════════════════════════════════════════════
   _buildTerrain() {
-    // 岸边草丛：成簇分布（不是均匀撒点），每簇 3~6 根草
+    this._decorReady = true;
+
+    // ── 岸顶草丛：成簇分布在干地上 ────────────────────
     this.grassTufts = [];
-    const clumps = Math.max(14, Math.round(this.w / 88));
-    for (let c = 0; c < clumps; c++) {
-      const cx = rand(0, this.w);
-      const cy = rand(2, this.bankLineAt(cx) - 6);
-      const blades = Math.round(rand(3, 6));
-      const baseHue = rand(74, 106);
-      for (let b = 0; b < blades; b++) {
-        this.grassTufts.push({
-          x: cx + rand(-7, 7),
-          y: cy + rand(-3, 4),
-          h: rand(6, 22),
-          lean: rand(-4.5, 4.5),
-          hue: baseHue + rand(-6, 6),
-          sat: rand(30, 52),
-          lig: rand(24, 44),
-          w: rand(1.1, 2.2),
-          phase: rand(0, Math.PI * 2),
-        });
+    const zones = this.landZones;
+    const perZone = Math.max(10, Math.round(this.w / 150));
+    for (const z of zones) {
+      const w = Math.max(20, z.dx1 - z.dx0);
+      const clumps = Math.max(4, Math.round(perZone * (w / this.w) * 3));
+      for (let c = 0; c < clumps; c++) {
+        const cx = rand(z.dx0, z.dx1);
+        const cy = this.groundYAt(cx) - rand(0, 4);
+        const blades = Math.round(rand(3, 6));
+        const baseHue = rand(74, 106);
+        for (let b = 0; b < blades; b++) {
+          this.grassTufts.push({
+            x: cx + rand(-7, 7),
+            y: cy - rand(0, 3),
+            h: rand(7, 24),
+            lean: rand(-4.5, 4.5),
+            hue: baseHue + rand(-6, 6),
+            sat: rand(30, 52),
+            lig: rand(24, 44),
+            w: rand(1.1, 2.2),
+            phase: rand(0, Math.PI * 2),
+          });
+        }
       }
     }
 
-    // 岸边石头：形状不规则（用椭圆 + 随机旋转 + 顶点扰动）
+    // ── 岸顶石头 ──────────────────────────────────────
     this.rocks = [];
-    const rockN = Math.max(8, Math.round(this.w / 150));
+    const rockN = Math.max(8, Math.round(this.w / 190));
     for (let i = 0; i < rockN; i++) {
-      const x = rand(0, this.w);
+      const z = zones.length ? zones[i % zones.length] : { dx0: 0, dx1: this.w };
+      const x = rand(z.dx0, z.dx1);
       const r = rand(4, 13);
       this.rocks.push({
         x,
-        y: rand(this.bankLineAt(x) - 14, this.bankLineAt(x) + 2),
+        y: this.groundYAt(x) - rand(0, r * 0.5),
         r,
         rot: rand(0, Math.PI),
         shade: rand(0.62, 0.95),
@@ -162,14 +519,15 @@ export class World {
       });
     }
 
-    // 岸边细碎卵石 / 贝壳碎屑（拟真细节，不参与碰撞）
+    // ── 岸顶细碎卵石 ──────────────────────────────────
     this.pebbles = [];
-    const pebN = Math.max(24, Math.round(this.w / 42));
+    const pebN = Math.max(20, Math.round(this.w / 55));
     for (let i = 0; i < pebN; i++) {
-      const x = rand(0, this.w);
+      const z = zones.length ? zones[i % zones.length] : { dx0: 0, dx1: this.w };
+      const x = rand(z.dx0, z.dx1);
       this.pebbles.push({
         x,
-        y: rand(0, this.bankLineAt(x) - 2),
+        y: this.groundYAt(x) - rand(-1, 10),
         r: rand(0.8, 2.6),
         rot: rand(0, Math.PI),
         lig: rand(0.72, 1.15),
@@ -177,47 +535,68 @@ export class World {
       });
     }
 
-    // 岸边沙粒噪点（大批量、极低对比度，形成"颗粒感"）
+    // ── 岸顶沙粒噪点 ──────────────────────────────────
     this.sandGrain = [];
-    const grainN = Math.round((this.w * this.bankY) / 520);
+    const grainN = Math.round((this.w * this.bankSpan) / 420);
     for (let i = 0; i < grainN; i++) {
-      const x = rand(0, this.w);
+      const z = zones.length ? zones[i % zones.length] : { dx0: 0, dx1: this.w };
+      const x = rand(z.dx0, z.dx1);
       this.sandGrain.push({
         x,
-        y: rand(0, this.bankLineAt(x)),
+        y: this.groundYAt(x) - rand(-2, 26),
         r: rand(0.4, 1.3),
         dark: Math.random() < 0.55,
         a: rand(0.05, 0.18),
       });
     }
 
-    // 泥沼气泡：分两类——缓慢上浮的大泡 + 贴着泥面的小闷泡
+    // ── 断面上的石头（岸体切面上嵌着的石块）────────────
+    this.bankStones = [];
+    const stoneN = Math.max(6, Math.round(this.w / 260));
+    for (let i = 0; i < stoneN; i++) {
+      const left = i % 2 === 0;
+      const x = left ? rand(2, this.waterLeftX * 0.9) : rand(this.w - this.waterLeftX * 0.9, this.w - 2);
+      const g = this.groundYAt(x);
+      this.bankStones.push({
+        x,
+        y: rand(g + 18, this.h - 10),
+        rx: rand(7, 20),
+        ry: rand(4, 11),
+        ...this._blobParams(2, 0.10, 0.26),
+        shade: rand(0.72, 1.05),
+      });
+    }
+
+    // ── 池底气泡 ──────────────────────────────────────
     this.bubbles = [];
-    const bubN = Math.max(18, Math.round(this.w / 62));
+    const bubN = Math.max(14, Math.round(this.w / 90));
     for (let i = 0; i < bubN; i++) {
-      const x = rand(0, this.w);
-      const top = this.marshLineAt(x);
+      const s = this.waterSpans[i % this.waterSpans.length];
+      const x = rand(s.x0 + 6, Math.max(s.x0 + 7, s.x1 - 6));
+      const floor = this.groundYAt(x);
       const big = Math.random() < 0.4;
       this.bubbles.push({
         x,
-        y: rand(top + 3, top + (this.h - top) * (big ? 0.55 : 1)),
+        y: rand(floor - 6, floor - (big ? 30 : 10)),
         r: big ? rand(2.6, 5.4) : rand(1.0, 2.4),
         phase: rand(0, Math.PI * 2),
         speed: big ? rand(0.28, 0.6) : rand(0.6, 1.4),
-        rise: big ? rand(3, 8) : 0,     // 大泡缓缓上浮像素
+        rise: big ? rand(3, 8) : 0,
         drift: rand(-3, 3),
         ...this._blobParams(2, 0.10, 0.24),
       });
     }
 
-    // 水底沉积颗粒（悬浮的泥沙点，营造浑浊体积）
+    // ── 水底沉积颗粒 ──────────────────────────────────
     this.silt = [];
-    const siltN = Math.round((this.w * (this.h - this.marshY)) / 900);
+    const siltN = Math.round((this.w * this.waterHeight) / 1400);
     for (let i = 0; i < siltN; i++) {
-      const x = rand(0, this.w);
+      const s = this.waterSpans[i % this.waterSpans.length];
+      const x = rand(s.x0 + 4, Math.max(s.x0 + 5, s.x1 - 4));
+      const floor = this.groundYAt(x);
       this.silt.push({
         x,
-        y: rand(this.marshLineAt(x) - 24, this.h),
+        y: rand(floor - 34, floor - 4),
         r: rand(0.5, 2.0),
         phase: rand(0, Math.PI * 2),
         speed: rand(0.1, 0.35),
@@ -225,53 +604,54 @@ export class World {
       });
     }
 
-    // 水底零星螺壳 / 枯枝剪影（贴泥面）
+    // ── 水底零星螺壳 / 枯枝剪影 ───────────────────────
     this.bottomDebris = [];
-    const debN = Math.max(6, Math.round(this.w / 220));
+    const debN = Math.max(6, Math.round(this.w / 260));
     for (let i = 0; i < debN; i++) {
-      const x = rand(0, this.w);
+      const s = this.waterSpans[i % this.waterSpans.length];
+      const x = rand(s.x0 + 6, Math.max(s.x0 + 7, s.x1 - 6));
       this.bottomDebris.push({
         x,
-        y: rand(this.marshLineAt(x) - 6, this.h - 4),
+        y: this.groundYAt(x) - rand(2, 8),
         r: rand(3, 9),
         rot: rand(-0.5, 0.5),
         twig: Math.random() < 0.5,
       });
     }
 
-    // 泥面淤泥团：深浅不一的有机斑块，打破整片同色渐变（外形随机）
+    // ── 淤泥团 / 泥线小丘（贴池底）────────────────────
     this.mudClumps = [];
-    const clumpN = Math.max(28, Math.round(this.w / 34));
-    for (let i = 0; i < clumpN; i++) {
-      const x = rand(0, this.w);
-      const span = Math.max(12, this.h - this.marshLineAt(x) - 8);
-      this.mudClumps.push({
-        x,
-        y: this.marshLineAt(x) + rand(5, span),
-        rx: rand(6, 26),
-        ry: rand(2.5, 9),
-        ...this._blobParams(3, 0.10, 0.30),
-        alpha: rand(0.08, 0.22),
-        dark: Math.random() < 0.6,
-      });
-    }
-
-    // 泥沼边缘淤泥小丘：贴着泥线，让水陆边界参差不齐（不是一条顺滑曲线）
     this.mudEdges = [];
-    const edgeN = Math.max(20, Math.round(this.w / 70));
-    for (let i = 0; i < edgeN; i++) {
-      const x = rand(0, this.w);
-      this.mudEdges.push({
-        x,
-        y: this.marshLineAt(x) + rand(-1, 3),
-        rx: rand(5, 15),
-        ry: rand(2.5, 7),
-        ...this._blobParams(2, 0.12, 0.30),
-      });
+    for (const s of this.waterSpans) {
+      const span = s.x1 - s.x0;
+      const n1 = Math.max(6, Math.round(span / 60));
+      for (let i = 0; i < n1; i++) {
+        const x = rand(s.x0, s.x1);
+        this.mudClumps.push({
+          x,
+          y: this.groundYAt(x) - rand(1, 10),
+          rx: rand(6, 26),
+          ry: rand(2.5, 9),
+          ...this._blobParams(3, 0.10, 0.30),
+          alpha: rand(0.08, 0.22),
+          dark: Math.random() < 0.6,
+        });
+      }
+      const n2 = Math.max(5, Math.round(span / 110));
+      for (let i = 0; i < n2; i++) {
+        const x = rand(s.x0, s.x1);
+        this.mudEdges.push({
+          x,
+          y: this.groundYAt(x) - rand(-1, 3),
+          rx: rand(5, 15),
+          ry: rand(2.5, 7),
+          ...this._blobParams(2, 0.12, 0.30),
+        });
+      }
     }
   }
 
-  /** 生成一组不规则轮廓参数（blobPath 用），供泥团/气泡/卵石等随机外形 */
+  /** 生成一组不规则轮廓参数（blobPath 用） */
   _blobParams(count = 2, ampLo = 0.10, ampHi = 0.28) {
     const shp = blobShape(Math.random, count, ampLo, ampHi);
     return { amps: shp.amps, phases: shp.phases, rot: rand(0, Math.PI * 2) };
@@ -291,17 +671,78 @@ export class World {
 
   _buildRipples() {
     this.ripples = [];    // 仅保留"入水溅射"这类短促视觉圈（非主水面波动）
+    this.footprints = []; // 岸上爬行脚印（阶段 5-⑭）
   }
 
+  // ════════════════════════════════════════════════════════
+  //  脚 印
+  // ════════════════════════════════════════════════════════
   /**
-   * 扰动水面（投喂 / 生物入水 / 雨滴）
-   * 直接落进波动方程场，waves 会真实传播 + 干涉 + 衰减。
-   * @param {number} x,y
-   * @param {number} strength 强度（1 ≈ 一颗小石子）
+   * 岸上爬行脚印（阶段 5-⑭）—— 乌龟在岸上留下的足迹。
+   * @param {number} x,y 落点
+   * @param {number} angle 爬行方向（rad）
+   * @param {number} size 乌龟体型（决定脚印大小）
+   * @param {number} side 左右侧（-1/1）
    */
+  addFootprint(x, y, angle, size, side = 1) {
+    if (!this.isLand(x, y)) return;
+    // 靠水线近的算"湿印"，颜色更深
+    const wet = this.surfaceAt(x) - this.groundYAt(x) < 30;
+    this.footprints.push({
+      x, y, angle, side,
+      size: clamp(size * 0.38, 3.6, 11),
+      wet,
+      life: 1,                       // 1 → 0 淡出
+      decay: wet ? 0.055 : 0.032,
+    });
+    if (this.footprints.length > 90) this.footprints.shift();
+  }
+
+  _updateFootprints(dt) {
+    for (let i = this.footprints.length - 1; i >= 0; i--) {
+      const f = this.footprints[i];
+      f.life -= f.decay * dt;
+      if (f.life <= 0) this.footprints.splice(i, 1);
+    }
+  }
+
+  _drawFootprints(ctx) {
+    if (!this.footprints.length) return;
+    ctx.save();
+    for (const f of this.footprints) {
+      const a = f.life * (f.wet ? 0.48 : 0.38);
+      if (a <= 0.01) continue;
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.rotate(f.angle);
+      const s = f.size * (0.6 + f.life * 0.4);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = f.wet ? '#26241b' : '#3e3828';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, s * 0.62, s * 1.0, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      for (let k = -1; k <= 1; k++) {
+        ctx.moveTo(0, -s * 1.0);
+        ctx.arc(k * s * 0.36, -s * 0.98, s * 0.17, 0, Math.PI * 2);
+      }
+      ctx.fill();
+      ctx.globalAlpha = a * 0.5;
+      ctx.strokeStyle = f.wet ? '#8a7c5a' : '#a8986f';
+      ctx.lineWidth = Math.max(0.8, s * 0.12);
+      ctx.beginPath();
+      ctx.ellipse(0, s * 0.28, s * 0.5, s * 0.5, 0, 0.15 * Math.PI, 0.85 * Math.PI);
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  水 面 扰 动
+  // ════════════════════════════════════════════════════════
   addRipple(x, y, strength = 1) {
     if (this.wave) this.wave.disturb(x, y, strength * 1.2, 2 + Math.round(strength));
-    // 保留一圈稍纵即逝的亮环，增强"落点"的即时反馈
     this.ripples.push({
       x, y,
       r: 2,
@@ -313,19 +754,14 @@ export class World {
   }
 
   /**
-   * 鼠标尾迹 —— 沿移动线段连续扰动波场，形成真实的连锁波纹（wake）
-   * @param {number} x0,y0 上一位置
-   * @param {number} x1,y1 当前位置
-   * @param {number} speed 光标速度 px/s（越快扰动越强）
+   * 鼠标尾迹 —— 沿移动线段连续扰动波场（真实连锁波纹）
    */
   addWake(x0, y0, x1, y1, speed = 0) {
     if (!this.wave) return;
     const nat = CONFIG.natural ?? {};
-    // 强度：基准系数 × 速度增量；半径走 CONFIG（默认 1 格 = 只在近处起一两圈）
     const k = nat.waveCursorStr ?? 0.55;
     const s = clamp(k * (0.4 + speed / 1400), k * 0.4, k * 1.6);
     const rad = nat.waveCursorRadius ?? 1;
-    // 起点不在水面就跳过（避免岸上拖动也起波）
     if (!this.isWater(x1, y1)) return;
     this.wave.disturbLine(x0, y0, x1, y1, s, rad);
   }
@@ -337,35 +773,114 @@ export class World {
       rp.alpha -= 1.1 * dt;
       if (rp.alpha <= 0 || rp.r >= rp.maxR) this.ripples.splice(i, 1);
     }
-    // 推进真实波场（核心）
     if (this.wave) this.wave.update(dt);
-    for (const b of this.bubbles) {
-      b.phase += b.speed * dt;
-    }
-    for (const s of this.silt) {
-      s.phase += s.speed * dt;
+    this._updateFootprints(dt);
+    for (const b of this.bubbles) b.phase += b.speed * dt;
+    for (const s of this.silt) s.phase += s.speed * dt;
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  路 径 工 具
+  // ════════════════════════════════════════════════════════
+  /** 水面多边形（每段水域一条子路径：水线 → 池底） */
+  _waterPath(ctx) {
+    ctx.beginPath();
+    for (const s of this.waterSpans) {
+      const x0 = s.x0, x1 = s.x1;
+      ctx.moveTo(x0, this.surfaceAt(x0));
+      for (let x = x0; x <= x1; x += 6) ctx.lineTo(x, this.surfaceAt(x));
+      ctx.lineTo(x1, this.surfaceAt(x1));
+      ctx.lineTo(x1, this.groundYAt(x1));
+      for (let x = x1; x >= x0; x -= 6) ctx.lineTo(x, this.groundYAt(x));
+      ctx.closePath();
     }
   }
 
-  // ────────────────────────────────────────────────────────
-  //  渲染
-  // ────────────────────────────────────────────────────────
+  /** 水线（只有水面那一条线，岸段跳过） */
+  surfacePath(ctx) {
+    ctx.beginPath();
+    for (const s of this.waterSpans) {
+      let first = true;
+      for (let x = s.x0; x <= s.x1; x += 6) {
+        const y = this.surfaceAt(x);
+        first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        first = false;
+      }
+    }
+  }
 
+  /** 地表曲线（整场地形轮廓） */
+  _groundPath(ctx) {
+    ctx.beginPath();
+    ctx.moveTo(0, this.groundYAt(0));
+    for (let x = 0; x <= this.w; x += 6) ctx.lineTo(x, this.groundYAt(x));
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  渲 染
+  // ════════════════════════════════════════════════════════
   draw(ctx, time) {
     this._ensureTextures();
-    this._drawWater(ctx, time);
-    this._drawWaveSurface(ctx, time);   // 真实波场折射明暗
-    this._drawMarsh(ctx, time);
-    this._drawBank(ctx, time);
+    this._drawEarth(ctx, time);        // 剖面土体（岸 + 池底，最底层）
+    this._drawWater(ctx, time);        // 水体（水色分层 + 流动纹理 + 光柱）
+    this._drawWaveSurface(ctx, time);  // 真实波场折射明暗
+    this._drawBed(ctx, time);          // 池底淤泥 / 沉积 / 气泡
+    this._drawBank(ctx, time);         // 岸顶草皮 / 沙 / 石
+    this._drawFootprints(ctx);
+    this._drawSurfaceSheet(ctx, time); // 水面"薄层"（俯角感）
     this._drawRipples(ctx);
+  }
+
+  /** 剖面土体：地表曲线以下全是"切开的土"，越深越暗 */
+  _drawEarth(ctx) {
+    const C = CONFIG.colors;
+    ctx.save();
+    this._groundPath(ctx);
+    ctx.lineTo(this.w, this.h);
+    ctx.lineTo(0, this.h);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, this.bankTopY, 0, this.h);
+    g.addColorStop(0, C.soil ?? '#6a5740');
+    g.addColorStop(0.45, C.soilWet ?? '#463a29');
+    g.addColorStop(1, C.soilDeep ?? '#382f22');
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    // 断面裁剪：土体纹理 + 石块 + 层理线
+    ctx.clip();
+    if (CONFIG.natural?.terrainTex !== false && this.tex) {
+      tileTexture(ctx, this.tex.mud, 0, this.bankTopY, this.w, this.h - this.bankTopY, 0, 0,
+        (CONFIG.natural?.terrainTexAlpha ?? 0.55) * 0.7);
+    }
+    // 层理：几道横向的深浅带（沉积层的感觉）
+    ctx.globalAlpha = 0.16;
+    for (let i = 0; i < 5; i++) {
+      const y = this.bankTopY + (this.h - this.bankTopY) * ((i + 0.5) / 5)
+        + Math.sin(i * 3.1) * 14;
+      ctx.fillStyle = i % 2 ? '#2a2216' : '#7a6a4c';
+      ctx.fillRect(0, y, this.w, 3 + i * 1.6);
+    }
+    ctx.globalAlpha = 1;
+    // 嵌在断面里的石头
+    for (const s of this.bankStones) {
+      const c = Math.round(118 * s.shade);
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = `rgb(${Math.round(c * 1.02)},${c},${Math.round(c * 0.9)})`;
+      blobPath(ctx, s.x, s.y, s.rx, s.ry, s.amps, s.phases, s.rot);
+      ctx.fill();
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#e8dfc8';
+      blobPath(ctx, s.x - s.rx * 0.2, s.y - s.ry * 0.35, s.rx * 0.5, s.ry * 0.4,
+        s.amps, s.phases, s.rot);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 
   /**
    * 真实波场渲染 —— 把高度梯度当水面斜率做折射着色
-   *
-   * 性能关键：不在主 canvas 上逐块 fillRect（2.5 万次/帧太贵），
-   * 而是在一张低分辨率 offscreen canvas 上用 ImageData 直接写像素
-   * （≈1.4 万像素的纯数组运算），最后一次性 drawImage 放大贴回。
+   * 低分辨率 offscreen 上用 ImageData 直接写像素，最后一次性放大贴回。
    */
   _drawWaveSurface(ctx, time) {
     const N = CONFIG.natural || {};
@@ -377,7 +892,6 @@ export class World {
     const wh = bot - top;
     if (wh <= 0) return;
 
-    // offscreen 低分辨率画布（每像素 ≈ waveBlock px），惰性创建/复用
     const block = CONFIG.natural?.waveBlock ?? 6;
     const ow = Math.max(2, Math.ceil(this.w / block));
     const oh = Math.max(2, Math.ceil(wh / block));
@@ -390,22 +904,19 @@ export class World {
     }
 
     const data = this._waveImg.data;
-    const lightDirX = -0.55, lightDirY = -0.83;   // 光从左上来
+    const lightDirX = -0.55, lightDirY = -0.83;
     let p = 0;
     for (let py = 0; py < oh; py++) {
-      const sx = 0, sy = top + (py + 0.5) * block;
-      // 预判该行是否落在水面内（粗略：用中线采样即可，精确边界交给 clip）
+      const sy = top + (py + 0.5) * block;
       for (let px = 0; px < ow; px++) {
-        const s = this.wave.sample(sx + (px + 0.5) * block, sy);
+        const s = this.wave.sample((px + 0.5) * block, sy);
         const dot = s.gx * lightDirX + s.gy * lightDirY;
         const v = dot * 2.1 + s.h * 0.45;
         const a = Math.abs(v) * 127;
         if (v > 0) {
-          // 波峰：亮青白
           data[p] = 228; data[p + 1] = 248; data[p + 2] = 255;
           data[p + 3] = a > 255 ? 255 : a;
         } else {
-          // 波谷：深水色
           data[p] = 10; data[p + 1] = 42; data[p + 2] = 54;
           const a2 = a * 0.85;
           data[p + 3] = a2 > 255 ? 255 : a2;
@@ -415,22 +926,12 @@ export class World {
     }
     this._waveCtx.putImageData(this._waveImg, 0, 0);
 
-    // 贴回主画布（裁剪进水面多边形）
     ctx.save();
     this._waterPath(ctx);
     ctx.clip();
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(this._waveCv, 0, top, this.w, wh);
     ctx.restore();
-  }
-
-  /** 构建水面多边形路径（岸线 → 泥沼线） */
-  _waterPath(ctx) {
-    ctx.beginPath();
-    ctx.moveTo(0, this.bankLineAt(0));
-    for (let x = 0; x <= this.w; x += 6) ctx.lineTo(x, this.bankLineAt(x));
-    for (let x = this.w; x >= 0; x -= 6) ctx.lineTo(x, this.marshLineAt(x));
-    ctx.closePath();
   }
 
   _drawWater(ctx, time) {
@@ -443,9 +944,9 @@ export class World {
 
     ctx.save();
     this._waterPath(ctx);
-    ctx.clip();     // 全部水面纹理都裁在水里
+    ctx.clip();
 
-    // ── 1) 基础水体：竖直三段深浅（近岸/中景/深水）────────
+    // ── 1) 基础水体：竖直三段深浅 ─────────────────────
     const g = ctx.createLinearGradient(0, top, 0, bot);
     if (nat) {
       g.addColorStop(0.00, C.waterShallow);
@@ -459,22 +960,21 @@ export class World {
     ctx.fillStyle = g;
     ctx.fillRect(0, top - 8, this.w, hh + 16);
 
-    // ── 2) 天空倒影带（紧贴岸线的一条横向亮带，随时间呼吸）──
+    // ── 2) 天空倒影带（紧贴水线的亮带，随时间呼吸）──
     if (nat && N.skyReflect !== false) {
-      const a = 0.16 + 0.05 * Math.sin(time * 0.5);
+      const a = 0.22 + 0.06 * Math.sin(time * 0.5);
       const rg = ctx.createLinearGradient(0, top, 0, top + hh * 0.34);
-      rg.addColorStop(0, `rgba(207,234,244,${(a * 1.5).toFixed(3)})`);
-      rg.addColorStop(0.5, `rgba(180,220,236,${(a * 0.6).toFixed(3)})`);
-      rg.addColorStop(1, 'rgba(180,220,236,0)');
+      rg.addColorStop(0, `rgba(232,247,252,${(a * 1.5).toFixed(3)})`);
+      rg.addColorStop(0.5, `rgba(198,232,244,${(a * 0.6).toFixed(3)})`);
+      rg.addColorStop(1, 'rgba(198,232,244,0)');
       ctx.fillStyle = rg;
       ctx.fillRect(0, top - 4, this.w, hh * 0.36);
     }
 
-    // ── 3) 水面流动纹理：多频正弦叠加的横向波纹（分段断续）──
+    // ── 3) 水面流动纹理 ────────────────────────────────
     if (nat && N.surfaceFlow !== false) {
       this._drawSurfaceFlow(ctx, time);
     } else {
-      // 关闭自然模式时保留原有的稀疏高光
       ctx.globalAlpha = 0.055;
       ctx.strokeStyle = '#bfe6f2';
       ctx.lineWidth = 1.2;
@@ -490,20 +990,45 @@ export class World {
       ctx.globalAlpha = 1;
     }
 
-    // ── 4) 水下体积暗角：左右两侧 + 深处更暗，形成"水塘感"──
+    // ── 4) 水下体积：底部轻微压暗 ─────────────────────
     if (nat) {
       const vg = ctx.createLinearGradient(0, top, 0, bot);
       vg.addColorStop(0, 'rgba(10,40,52,0)');
-      vg.addColorStop(0.62, 'rgba(10,40,52,0.06)');
-      vg.addColorStop(1, 'rgba(6,28,38,0.26)');
+      vg.addColorStop(0.62, 'rgba(10,40,52,0.03)');
+      vg.addColorStop(1, 'rgba(8,34,44,0.16)');
       ctx.fillStyle = vg;
       ctx.fillRect(0, top - 8, this.w, hh + 16);
+    }
+
+    // ── 5) 阳光穿透光柱 ────────────────────────────────
+    if (nat && N.sunShaft !== false) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 5; i++) {
+        const sway = Math.sin(time * 0.22 + i * 1.9) * 46;
+        const x0 = this.w * (0.1 + i * 0.2) + sway;
+        const wid = 42 + 26 * Math.sin(i * 2.1);
+        const a = 0.045 + 0.03 * Math.sin(time * 0.4 + i);
+        const sg = ctx.createLinearGradient(x0, top, x0 + wid * 0.6, bot);
+        sg.addColorStop(0, `rgba(214,246,255,${(a * 1.5).toFixed(3)})`);
+        sg.addColorStop(0.55, `rgba(180,232,248,${a.toFixed(3)})`);
+        sg.addColorStop(1, 'rgba(150,214,236,0)');
+        ctx.fillStyle = sg;
+        ctx.beginPath();
+        ctx.moveTo(x0 - wid * 0.5, top);
+        ctx.lineTo(x0 + wid * 0.5, top);
+        ctx.lineTo(x0 + wid * 1.5, bot);
+        ctx.lineTo(x0 + wid * 0.4, bot);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
     }
 
     ctx.restore();
   }
 
-  /** 水面流动纹理：5 层不同频率/相位的正弦波，断续出现像真实反光 */
+  /** 水面流动纹理：多层不同频率/相位的正弦波，断续出现像真实反光 */
   _drawSurfaceFlow(ctx, time) {
     ctx.save();
     ctx.lineCap = 'round';
@@ -512,8 +1037,7 @@ export class World {
     const rows = 9;
     for (let i = 0; i < rows; i++) {
       const f = (i + 0.5) / rows;
-      const baseY = top + hh * (0.06 + f * 0.86);
-      // 每一行断续的起止（缓慢漂移）
+      const baseY = top + hh * (0.03 + f * 0.62);
       const travel = (time * (0.012 + i * 0.004) + i * 0.29) % 1;
       const segStart = travel * this.w * 1.3 - this.w * 0.3;
       const segLen = this.w * (0.18 + 0.22 * Math.abs(Math.sin(i * 2.3 + 1)));
@@ -537,54 +1061,127 @@ export class World {
     ctx.restore();
   }
 
-  _drawMarsh(ctx, time) {
+  /**
+   * 水面"薄层"（阶段 6-⑧）—— 侧视 + 一点俯角的关键观感来源：
+   * 在水线下方 ~14px 内铺一条亮色薄带（我们能"看到"的那层水面），
+   * 边缘带细碎的横向波光，让荷叶/龟看起来是浮在这张面上。
+   */
+  _drawSurfaceSheet(ctx, time) {
+    if (CONFIG.natural?.surfaceSheet === false) return;
+    const C = CONFIG.colors;
+    ctx.save();
+    this._waterPath(ctx);
+    ctx.clip();
+
+    const thick = Math.max(8, this.waterHeight * 0.045);
+    for (const s of this.waterSpans) {
+      // 亮薄带
+      ctx.beginPath();
+      ctx.moveTo(s.x0, this.surfaceAt(s.x0));
+      for (let x = s.x0; x <= s.x1; x += 8) ctx.lineTo(x, this.surfaceAt(x));
+      ctx.lineTo(s.x1, this.surfaceAt(s.x1) + thick);
+      for (let x = s.x1; x >= s.x0; x -= 8) ctx.lineTo(x, this.surfaceAt(x) + thick);
+      ctx.closePath();
+      const g = ctx.createLinearGradient(0, this.waterY - 6, 0, this.waterY + thick);
+      g.addColorStop(0, 'rgba(240,252,255,0.42)');
+      g.addColorStop(0.45, `rgba(200,238,248,0.20)`);
+      g.addColorStop(1, 'rgba(180,226,240,0)');
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+
+    // 横向波光碎条（水面张力的粼粼感）
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 26; i++) {
+      const p = (i * 0.618 + time * 0.02) % 1;
+      const x = this.waterLeftX + p * (this.waterRightX - this.waterLeftX);
+      if (!this.isWaterColumn(x)) continue;
+      const y = this.surfaceAt(x) + 2 + ((i * 7) % 5);
+      const a = 0.10 + 0.14 * Math.abs(Math.sin(time * 1.3 + i * 1.7));
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = i % 3 ? '#ffffff' : '#d6f2fa';
+      ctx.lineWidth = 1.1 + (i % 3) * 0.5;
+      const len = 10 + (i % 5) * 7;
+      ctx.beginPath();
+      ctx.moveTo(x - len, y);
+      ctx.quadraticCurveTo(x, y - 1.6, x + len, y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // 水线高光（顶边一条亮线，把空气和水分开）
+    ctx.strokeStyle = `rgba(255,255,255,${(0.30 + 0.10 * Math.sin(time * 0.9)).toFixed(3)})`;
+    ctx.lineWidth = 1.4;
+    this.surfacePath(ctx);
+    ctx.stroke();
+    ctx.restore();
+
+    // 水线附近的空气侧：一点远景柔光（天空与水面的过渡）
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const T = Math.max(6, this.waterHeight * 0.03);
+    const gg = ctx.createLinearGradient(0, this.waterY - T, 0, this.waterY + 2);
+    gg.addColorStop(0, 'rgba(255,255,255,0)');
+    gg.addColorStop(1, `rgba(226,244,252,${(0.10 + 0.04 * Math.sin(time * 0.6)).toFixed(3)})`);
+    ctx.fillStyle = gg;
+    ctx.fillRect(this.waterLeftX, this.waterY - T, this.waterRightX - this.waterLeftX, T + 2);
+    ctx.restore();
+  }
+
+  /** 池底：淤泥 / 沉积 / 气泡 / 枯枝 */
+  _drawBed(ctx, time) {
     const N = CONFIG.natural || {};
     const nat = N.enabled !== false;
     const C = CONFIG.colors;
 
-    // 基础泥沼渐变
-    const g = ctx.createLinearGradient(0, this.marshY - 14, 0, this.h);
-    g.addColorStop(0, C.marsh);
-    g.addColorStop(1, C.marshMud);
-    ctx.fillStyle = g;
+    ctx.save();
+    // 池底基础色（贴地表曲线，每段水域一块）
+    for (const s of this.waterSpans) {
+      ctx.beginPath();
+      ctx.moveTo(s.x0, this.groundYAt(s.x0));
+      for (let x = s.x0; x <= s.x1; x += 8) ctx.lineTo(x, this.groundYAt(x));
+      ctx.lineTo(s.x1, this.h);
+      ctx.lineTo(s.x0, this.h);
+      ctx.closePath();
+      const g = ctx.createLinearGradient(0, this.bedY - 20, 0, this.h);
+      g.addColorStop(0, C.marsh);
+      g.addColorStop(1, C.marshMud);
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
 
-    ctx.beginPath();
-    ctx.moveTo(0, this.marshLineAt(0));
-    for (let x = 0; x <= this.w; x += 8) ctx.lineTo(x, this.marshLineAt(x));
-    ctx.lineTo(this.w, this.h);
-    ctx.lineTo(0, this.h);
-    ctx.closePath();
-    ctx.fill();
-
-    // ── 程序化泥浆纹理（阶段 5-⑪）：叠加 fBm 生成的泥斑/湿痕 ──
+    // 泥浆纹理
     if (nat && N.terrainTex !== false && this.tex) {
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(0, this.marshLineAt(0));
-      for (let x = 0; x <= this.w; x += 8) ctx.lineTo(x, this.marshLineAt(x));
-      ctx.lineTo(this.w, this.h);
-      ctx.lineTo(0, this.h);
-      ctx.closePath();
+      for (const s of this.waterSpans) {
+        ctx.moveTo(s.x0, this.groundYAt(s.x0));
+        for (let x = s.x0; x <= s.x1; x += 8) ctx.lineTo(x, this.groundYAt(x));
+        ctx.lineTo(s.x1, this.h);
+        ctx.lineTo(s.x0, this.h);
+        ctx.closePath();
+      }
       ctx.clip();
-      // 泥浆 + 淤积两层错位叠加（不同平铺偏移 → 不出现明显重复）
-      tileTexture(ctx, this.tex.mud, 0, this.marshY - 14, this.w, this.h - this.marshY + 14,
-        0, 0, N.terrainTexAlpha ?? 0.55);
-      tileTexture(ctx, this.tex.silt, 0, this.marshY - 14, this.w, this.h - this.marshY + 14,
+      tileTexture(ctx, this.tex.mud, 0, this.bedY - 20, this.w, this.h - this.bedY + 20, 0, 0,
+        N.terrainTexAlpha ?? 0.55);
+      tileTexture(ctx, this.tex.silt, 0, this.bedY - 20, this.w, this.h - this.bedY + 20,
         137, 89, (N.terrainTexAlpha ?? 0.55) * 0.6);
       ctx.restore();
     }
 
-    // 泥面与水体的过渡阴影（水底的暗）
+    // 泥面与水体的过渡阴影
     ctx.save();
     ctx.globalAlpha = 0.30;
-    const tg = ctx.createLinearGradient(0, this.marshY - 18, 0, this.marshY + 6);
-    tg.addColorStop(0, 'rgba(10,32,40,0.0)');
-    tg.addColorStop(1, 'rgba(10,26,30,0.7)');
-    ctx.fillStyle = tg;
-    ctx.fillRect(0, this.marshY - 18, this.w, 26);
+    for (const s of this.waterSpans) {
+      const tg = ctx.createLinearGradient(0, this.bedY - 26, 0, this.bedY + 6);
+      tg.addColorStop(0, 'rgba(10,32,40,0.0)');
+      tg.addColorStop(1, 'rgba(10,26,30,0.7)');
+      ctx.fillStyle = tg;
+      ctx.fillRect(s.x0, this.bedY - 26, s.x1 - s.x0, 32);
+    }
     ctx.restore();
 
-    // 淤泥团 + 泥线小丘（外形随机，泥面不再是一整块平色）
+    // 淤泥团 + 泥线小丘
     ctx.save();
     for (const c of this.mudClumps) {
       ctx.globalAlpha = c.alpha;
@@ -601,7 +1198,6 @@ export class World {
 
     if (nat && N.bottomSilt !== false) {
       ctx.save();
-      // 沉积泥沙颗粒（半透明悬浮，营造浑浊）
       for (const s of this.silt) {
         const pulse = 0.5 + 0.5 * Math.sin(s.phase);
         ctx.globalAlpha = 0.05 + pulse * 0.11;
@@ -610,7 +1206,6 @@ export class World {
         ctx.arc(s.x + Math.sin(s.phase) * s.drift, s.y, s.r, 0, Math.PI * 2);
         ctx.fill();
       }
-      // 泥底暗斑（不规则浊块）
       for (const d of this.bottomDebris) {
         ctx.globalAlpha = 0.34;
         ctx.fillStyle = `rgba(24,22,16,0.55)`;
@@ -633,76 +1228,80 @@ export class World {
       ctx.restore();
     }
 
-    // 气泡：大泡上浮 + 小泡闷在泥面
+    // 气泡
     ctx.save();
     for (const b of this.bubbles) {
       const pulse = 0.5 + 0.5 * Math.sin(b.phase);
       let by = b.y;
-      if (b.rise) by = b.y - (pulse * b.rise);   // 大泡缓缓上浮
+      if (b.rise) by = b.y - (pulse * b.rise);
       const alpha = (b.r > 2.6 ? 0.10 : 0.06) + pulse * (b.r > 2.6 ? 0.18 : 0.10);
       ctx.globalAlpha = alpha;
-      // 泡体（不规则团，不是正圆）
       ctx.fillStyle = b.r > 2.6 ? '#8a7f56' : '#6f6a48';
       const br = b.r * (0.8 + pulse * 0.4);
       blobPath(ctx, b.x + Math.sin(b.phase) * b.drift * 0.4, by,
         br, br * 0.85, b.amps, b.phases, b.rot + b.phase * 0.2);
       ctx.fill();
-      // 泡顶高光（小亮点，让泡有体积）
       ctx.globalAlpha = alpha * 0.8;
       ctx.fillStyle = '#c9c08e';
       ctx.beginPath();
-      ctx.arc(b.x + Math.sin(b.phase) * b.drift * 0.4 - b.r * 0.28, by - b.r * 0.3, b.r * 0.28, 0, Math.PI * 2);
+      ctx.arc(b.x + Math.sin(b.phase) * b.drift * 0.4 - b.r * 0.28, by - b.r * 0.3,
+        b.r * 0.28, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
   }
 
+  /** 岸顶：草皮层 + 草叶 + 石头 */
   _drawBank(ctx, time) {
     const N = CONFIG.natural || {};
     const nat = N.enabled !== false;
     const C = CONFIG.colors;
+    if (!this.landZones.length) return;
+    const thick = CONFIG.layout?.bankTopThick ?? 30;
 
-    // ── 基础沙地/草地渐变 ─────────────────────────────
-    const g = ctx.createLinearGradient(0, 0, 0, this.bankY);
-    if (nat) {
-      g.addColorStop(0.00, C.bankGrassDark);
-      g.addColorStop(0.34, C.bankGrass);
-      g.addColorStop(0.62, C.bankSand);
-      g.addColorStop(1.00, C.bankSandDark);
-    } else {
-      g.addColorStop(0, C.bankGrass);
-      g.addColorStop(0.45, C.bankSand);
-      g.addColorStop(1, '#b8a075');
-    }
-    ctx.fillStyle = g;
-
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(this.w, 0);
-    ctx.lineTo(this.w, this.bankLineAt(this.w));
-    for (let x = this.w; x >= 0; x -= 6) ctx.lineTo(x, this.bankLineAt(x));
-    ctx.closePath();
-    ctx.fill();
-
+    // ── 1) 草皮层：贴地表曲线的一条带（岸顶 + 台面）──
+    // 下沿不能越过水线（否则会盖在水面上），靠水一端自然收窄
     ctx.save();
-    // 岸边路径裁剪，让纹理不越界
+    for (const z of this.landZones) {
+      ctx.beginPath();
+      ctx.moveTo(z.x0, this.groundYAt(z.x0));
+      for (let x = z.x0; x <= z.x1; x += 6) ctx.lineTo(x, this.groundYAt(x));
+      for (let x = z.x1; x >= z.x0; x -= 6) {
+        ctx.lineTo(x, Math.max(this.groundYAt(x),
+          Math.min(this.groundYAt(x) + thick, this.surfaceAt(x) + 1)));
+      }
+      ctx.closePath();
+      const g = ctx.createLinearGradient(0, this.bankTopY, 0, this.waterY);
+      g.addColorStop(0.00, C.bankGrassDark);
+      g.addColorStop(0.30, C.bankGrass);
+      g.addColorStop(0.72, C.bankSand);
+      g.addColorStop(1.00, C.bankSandDark);
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // ── 2) 纹理与噪点（裁在草皮层里）────────────────
+    ctx.save();
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(this.w, 0);
-    ctx.lineTo(this.w, this.bankLineAt(this.w));
-    for (let x = this.w; x >= 0; x -= 6) ctx.lineTo(x, this.bankLineAt(x));
-    ctx.closePath();
+    for (const z of this.landZones) {
+      ctx.moveTo(z.x0, this.groundYAt(z.x0) - 2);
+      for (let x = z.x0; x <= z.x1; x += 6) ctx.lineTo(x, this.groundYAt(x) - 2);
+      for (let x = z.x1; x >= z.x0; x -= 6) {
+        ctx.lineTo(x, Math.max(this.groundYAt(x),
+          Math.min(this.groundYAt(x) + thick, this.surfaceAt(x) + 1)));
+      }
+      ctx.closePath();
+    }
     ctx.clip();
 
-    // ── 程序化沙地纹理（阶段 5-⑪）：fBm 细沙 + 湿泥错位叠加 ──
     if (nat && N.terrainTex !== false && this.tex) {
-      tileTexture(ctx, this.tex.sand, 0, 0, this.w, this.bankY + 10, 0, 0, N.terrainTexAlpha ?? 0.55);
-      tileTexture(ctx, this.tex.wetmud, 0, 0, this.w, this.bankY + 10, 71, 211,
-        (N.terrainTexAlpha ?? 0.55) * 0.45);
+      for (const z of this.landZones) {
+        tileTexture(ctx, this.tex.sand, z.x0, this.bankTopY, z.x1 - z.x0,
+          this.waterY - this.bankTopY + 20, 0, 0, (N.terrainTexAlpha ?? 0.55) * 0.8);
+      }
     }
-
     if (nat && N.bankTexture !== false) {
-      // 沙粒噪点
       for (const s of this.sandGrain) {
         ctx.globalAlpha = s.a;
         ctx.fillStyle = s.dark ? '#6b5636' : '#f2e6c6';
@@ -710,7 +1309,6 @@ export class World {
         ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
         ctx.fill();
       }
-      // 细碎卵石（不规则小团）
       for (const p of this.pebbles) {
         const c = Math.round(150 * p.lig);
         ctx.globalAlpha = 0.55;
@@ -719,44 +1317,35 @@ export class World {
         ctx.fill();
       }
     }
+    ctx.restore();
 
-    // 岸边湿泥过渡带（贴着岸线的一条深色湿痕，宽度随宽度波动）
-    ctx.globalAlpha = nat ? 0.42 : 0.35;
+    // ── 3) 湿痕：草皮层靠水那侧压暗一点（水汽）────────
+    ctx.save();
+    ctx.globalAlpha = nat ? 0.35 : 0.28;
     ctx.strokeStyle = '#79653f';
-    ctx.lineWidth = nat ? 7 : 5;
+    ctx.lineWidth = nat ? 6 : 4;
     ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(0, this.bankLineAt(0) - 1);
-    for (let x = 0; x <= this.w; x += 8) {
-      ctx.lineTo(x, this.bankLineAt(x) - 1 + Math.sin(x * 0.05) * 0.8);
-    }
-    ctx.stroke();
-    // 湿带内侧更亮的一点反光（水汽）
-    if (nat) {
-      ctx.globalAlpha = 0.18;
-      ctx.strokeStyle = '#c3b78e';
-      ctx.lineWidth = 1.6;
+    for (const z of this.landZones) {
+      const inner = z.x0 < this.waterLeftX ? z.x1 : z.x0;   // 靠水的一端
       ctx.beginPath();
-      ctx.moveTo(0, this.bankLineAt(0) + 3);
-      for (let x = 0; x <= this.w; x += 10) ctx.lineTo(x, this.bankLineAt(x) + 3);
+      for (let x = z.x0; x <= z.x1; x += 8) {
+        const y = this.groundYAt(x) + Math.max(0, 24 * (1 - Math.abs(x - inner) / 60));
+        x === z.x0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
       ctx.stroke();
     }
     ctx.restore();
 
-    // ── 石头（不规则轮廓 + 顶光 + 底部接触阴影）────────
+    // ── 4) 石头 ─────────────────────────────────────
     for (const r of this.rocks) {
       ctx.save();
       ctx.translate(r.x, r.y);
       ctx.rotate(r.rot);
-
-      // 接触阴影
       ctx.globalAlpha = 0.22;
       ctx.fillStyle = '#2a2416';
       ctx.beginPath();
       ctx.ellipse(0.8, r.r * 0.62, r.r * 1.02, r.r * 0.34, 0, 0, Math.PI * 2);
       ctx.fill();
-
-      // 石体
       const base = Math.round(112 * r.shade);
       ctx.globalAlpha = 0.94;
       ctx.fillStyle = `rgb(${Math.round(base * r.warm)},${base},${Math.round(base * 0.88)})`;
@@ -769,8 +1358,6 @@ export class World {
       }
       ctx.closePath();
       ctx.fill();
-
-      // 顶面受光
       ctx.globalAlpha = 0.22;
       ctx.fillStyle = '#fdfbf2';
       ctx.beginPath();
@@ -779,7 +1366,7 @@ export class World {
       ctx.restore();
     }
 
-    // ── 草丛（逐根带风摆，明暗层次）─────────────────────
+    // ── 5) 草丛（逐根带风摆）──────────────────────────
     ctx.save();
     ctx.lineCap = 'round';
     for (const t of this.grassTufts) {
@@ -795,7 +1382,6 @@ export class World {
         t.y - t.h
       );
       ctx.stroke();
-      // 叶尖高光
       if (t.h > 14) {
         ctx.globalAlpha = 0.5;
         ctx.strokeStyle = `hsl(${t.hue + 8}, ${t.sat}%, ${t.lig + 16}%)`;
@@ -810,12 +1396,12 @@ export class World {
     ctx.restore();
   }
 
-  /** 落点溅射环（短促亮环，增强"有东西落水"的即时反馈；主水面波动已由波场负责） */
+  /** 落点溅射环 */
   _drawRipples(ctx) {
     if (!this.ripples.length) return;
     ctx.save();
     for (const rp of this.ripples) {
-      const k = rp.r / rp.maxR;               // 0→1 生命周期
+      const k = rp.r / rp.maxR;
       ctx.globalAlpha = Math.max(0, rp.alpha) * (1 - k);
       ctx.strokeStyle = '#e6f6fb';
       ctx.lineWidth = 1.4 * (1 - k * 0.6);
