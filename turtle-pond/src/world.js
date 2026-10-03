@@ -287,23 +287,45 @@ export class World {
     return this.groundYAt(x) > this.surfaceAt(x) + 2;
   }
 
-  /** 判断点是否在水面可游区域 */
+  /**
+   * 判断点是否在水面可游区域。
+   *
+   * ⚠️ 上下两个边界的存在理由不一样，别随手改：
+   *   · 上边界 `y > s + 3`：为了让**浮在水面的饲料**（落在水线下 ~4px）也算在水里，
+   *     否则鱼龟永远吃不到它。代价是"水线以上 3px"成了既不算水也不算陆的空档，
+   *     由 `isLand` 的过渡带负责兜住（见下）。
+   *   · 下边界本来是 `y < g - 4`（池底上方留 4px），阶段 8-⑧ 收到 `y < g`：
+   *     那 4px 同样是空档 —— 龟贴着池底游时会被判成"既不在水也不在岸"
+   *     （实测残留 48~128 帧全在 climb_out 的贴底时刻）。水本来就该铺满到池底。
+   */
   isWater(x, y) {
     if (x < 0 || x > this.w || y < 0 || y > this.h) return false;
     const s = this.surfaceAt(x);
     const g = this.groundYAt(x);
     if (g <= s + 2) return false;         // 该列地表在水线之上 → 没有水
-    // 上边界留 3px：浮在水面的饲料（水线下 ~4px）也算在水里，鱼龟才吃得到
-    return y > s + 3 && y < g - 4;
+    return y > s + 3 && y <= g;
   }
 
   /**
    * 判断点是否"站在干地上"（岸 / 晒台）。
    * 容差 TOL 是为了让龟的"身体中心"（比脚高一点）也算踩在地上。
+   *
+   * ⚠️ 阶段 8-⑧ 补上水陆之间的过渡带：
+   * 水列的判据是"y 比水线深 3px 以上才算水"（`isWater` 留这 3px 是为了让浮在
+   * 水面的饲料也算在水里）。于是水线上下那几像素**既不算水也不算陆** ——
+   * 而龟在上岸 / 回水途中（climb_out / return）身体中心必然扫过这段，
+   * 就会被判成"既不在水也不在岸"（实测：跑 2 分钟有 1616 帧卡在这个空档里）。
+   * 现在把"贴着水线以上一个身位内"归到陆地，与 `isWater` 无缝衔接。
    */
   isLand(x, y) {
     const g = this.groundYAt(x);
-    if (g > this.surfaceAt(x) - 1) return false;   // 该列是水（地表在水下）
+    const s = this.surfaceAt(x);
+    // 分支判据与 isLandColumn 完全一致（isWaterColumn）—— 否则列判定与点判定
+    // 会在水线附近差出几像素，又是一条新的空档。
+    if (this.isWaterColumn(x)) {
+      // 水列：只认"贴着水线上方"的这一条过渡带；再往上是空气，不算地面
+      return y >= s - 30 && y <= s + 4;
+    }
     const TOL = 28;
     return y >= g - TOL && y <= g + 26;
   }
@@ -794,9 +816,9 @@ export class World {
   //  脚 印
   // ════════════════════════════════════════════════════════
   /**
-   * 岸上爬行脚印（阶段 5-⑭）—— 乌龟在岸上留下的足迹。
+   * 岸上爬行脚印（阶段 5-⑭；8-⑧ 起按侧视存几何）。
    * @param {number} x,y 落点
-   * @param {number} angle 爬行方向（rad）
+   * @param {number} angle 行进方向（rad，屏幕坐标）
    * @param {number} size 乌龟体型（决定脚印大小）
    * @param {number} side 左右侧（-1/1）
    */
@@ -804,8 +826,15 @@ export class World {
     if (!this.isLand(x, y)) return;
     // 靠水线近的算"湿印"，颜色更深
     const wet = this.surfaceAt(x) - this.groundYAt(x) < 30;
+    // 阶段 8-⑧：脚印是画在**地表**上的痕迹，所以倾斜角取**地形坡度**
+    // （旧版直接 rotate(angle) 是俯视语义 —— 朝右走时脚印整体转了 90°，
+    //  看着像一列歪着插进土里的爪子）。顺便记下水平行进方向，
+    // 侧视图里"往左走 / 往右走"决定坑口那撮堆土偏哪一边。
+    const slope = (this.groundYAt(x + 4) - this.groundYAt(x - 4)) / 8;
     this.footprints.push({
       x, y, angle, side,
+      rot: Math.atan(slope),
+      dir: Math.cos(angle) >= 0 ? 1 : -1,
       size: clamp(size * 0.38, 3.6, 11),
       wet,
       life: 1,                       // 1 → 0 淡出
@@ -822,33 +851,50 @@ export class World {
     }
   }
 
+  /**
+   * 画脚印（阶段 5-⑭；8-⑧ 由"俯视爪印"改成"侧视踩痕"）
+   *
+   * 旧画法 = 旋转的椭圆形脚掌 + 三个脚趾圆 + 一道弧，是**从上往下看**的爪印。
+   * 场景改成侧视剖面后它就不成立了：从侧面看土地，看不到脚掌形状和脚趾，
+   * 能看到的只有"地表被踩出一串浅浅的凹坑"。所以现在只画三样东西：
+   *   ① 踩实的暗色凹痕（横向拉长、纵向压得很薄 —— 宽高比 ≈ 4:1）
+   *   ② 后缘被脚带起来的一小撮土（侧视才有的"推土"感）
+   *   ③ 坑口的浅色高光边（凹坑下沿的亮边）
+   * 整体顺着地形坡度躺下（`rot`），而不是顺着俯视行进方向转。
+   */
   _drawFootprints(ctx) {
     if (!this.footprints.length) return;
     ctx.save();
     for (const f of this.footprints) {
-      const a = f.life * (f.wet ? 0.48 : 0.38);
+      const a = f.life * (f.wet ? 0.5 : 0.4);
       if (a <= 0.01) continue;
+      const s = f.size * (0.6 + f.life * 0.4);
       ctx.save();
       ctx.translate(f.x, f.y);
-      ctx.rotate(f.angle);
-      const s = f.size * (0.6 + f.life * 0.4);
+      ctx.rotate(f.rot ?? 0);           // 顺着坡面躺下
+
+      // ① 踩实的暗色凹痕
       ctx.globalAlpha = a;
-      ctx.fillStyle = f.wet ? '#26241b' : '#3e3828';
+      ctx.fillStyle = f.wet ? '#2b2820' : '#423c2c';
       ctx.beginPath();
-      ctx.ellipse(0, 0, s * 0.62, s * 1.0, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, s * 1.25, s * 0.30, 0, 0, Math.PI * 2);
       ctx.fill();
-      ctx.beginPath();
-      for (let k = -1; k <= 1; k++) {
-        ctx.moveTo(0, -s * 1.0);
-        ctx.arc(k * s * 0.36, -s * 0.98, s * 0.17, 0, Math.PI * 2);
-      }
-      ctx.fill();
+
+      // ② 后缘堆起的一小撮土
       ctx.globalAlpha = a * 0.5;
-      ctx.strokeStyle = f.wet ? '#8a7c5a' : '#a8986f';
-      ctx.lineWidth = Math.max(0.8, s * 0.12);
+      ctx.fillStyle = f.wet ? '#6d6248' : '#8f8360';
       ctx.beginPath();
-      ctx.ellipse(0, s * 0.28, s * 0.5, s * 0.5, 0, 0.15 * Math.PI, 0.85 * Math.PI);
+      ctx.ellipse(-(f.dir ?? 1) * s * 0.75, -s * 0.16, s * 0.6, s * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ③ 坑口的浅色高光边
+      ctx.globalAlpha = a * 0.42;
+      ctx.strokeStyle = f.wet ? '#9a8d6c' : '#c0b188';
+      ctx.lineWidth = Math.max(0.7, s * 0.10);
+      ctx.beginPath();
+      ctx.ellipse(0, s * 0.14, s * 1.15, s * 0.26, 0, 0.08 * Math.PI, 0.92 * Math.PI);
       ctx.stroke();
+
       ctx.restore();
     }
     ctx.restore();

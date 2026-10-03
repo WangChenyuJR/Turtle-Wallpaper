@@ -234,33 +234,51 @@ export class Plant {
   update(dt, time, movers) {
     // 摇摆由渲染时用 time 计算，这里只做浮叶的物理推动
     if (this.kind !== 'surface') return;
+    const P = CONFIG.plants ?? {};
+    const W = this.world;
 
-    // 生物经过把浮叶推开
+    // ── 生物经过把浮叶推开（阶段 8-⑧ 大幅弱化）────────────────
+    // 用户："龟龟和魚魚遇到荷叶杆会改变运动状态……侧视图他们不一定撞到杆了，
+    //       只是从后面正常经过，即使撞到了也不要突然在 Z 轴上快速移动。"
+    //
+    // 侧视剖面里荷叶浮在水面上、叶柄往水下伸，鱼和龟**大多是从它下面或后面经过**，
+    // 屏幕投影上重叠 ≠ 真的撞到。所以这里两条硬规则：
+    //   ① **必须同层**：只有生物真的贴着水面（离水线 < 一个身位）才算接触，
+    //      从荷叶下方/后方游过一律不算（旧版只看 2D 距离，鱼在深处经过也会推它）；
+    //   ② **推力只走水面平面内（横向）**：荷叶是浮在水上的，不可能被撞得跳起来。
+    //      纵向只留一丝被水波顶起来的起伏，且限幅在几像素内
+    //      —— 这就是"不要突然在 Z 轴上快速移动"的可测版本。
     let ax = 0, ay = 0;
     const px = this.x + this.ox, py = this.y + this.oy;
-    for (const m of movers) {
+    const band = P.leafTouchBand ?? 14;      // 生物离水线多少 px 内才算"同一层"
+    for (const m of (movers ?? [])) {
+      const layerGap = Math.abs(m.y - W.surfaceAt(m.x));
+      if (layerGap > band + (m.size ?? 10) * 0.5) continue;   // 在荷叶下面/后面经过，不算撞到
       const d2 = dist2(px, py, m.x, m.y);
       const rr = this.size + (m.size ?? 10);
       if (d2 < rr * rr && d2 > 0.01) {
         const d = Math.sqrt(d2);
-        const f = (1 - d / rr) * 26;
+        const f = (1 - d / rr) * (P.leafPush ?? 12);
         ax += ((px - m.x) / d) * f;
         ay += ((py - m.y) / d) * f;
       }
     }
+
+    // 横向：正常推开 + 阻尼 + 回弹到原位
     this.pushVx += ax * dt;
-    this.pushVy += ay * dt;
-    // 阻尼 + 回弹到原位
-    this.pushVx *= 0.88;
-    this.pushVy *= 0.88;
+    this.pushVx *= P.leafDamp ?? 0.90;
     this.pushVx += -this.ox * 3.2 * dt;
-    this.pushVy += -this.oy * 3.2 * dt;
     this.ox += this.pushVx * dt;
-    this.oy += this.pushVy * dt;
-    // 限制最大漂移
-    const maxOff = 26;
+    const maxOff = P.leafOff ?? 22;
     this.ox = clamp(this.ox, -maxOff, maxOff);
-    this.oy = clamp(this.oy, -maxOff, maxOff);
+
+    // 纵向：只留一丝起伏（浮叶是浮在水上的，不该被撞得上下跳）
+    this.pushVy += ay * dt * (P.leafPushY ?? 0.12);
+    this.pushVy *= 0.86;
+    this.pushVy += -this.oy * 3.2 * dt;
+    this.oy += this.pushVy * dt;
+    const maxOffY = P.leafOffY ?? 3;
+    this.oy = clamp(this.oy, -maxOffY, maxOffY);
   }
 
   /** 当前实际位置（含浮叶偏移） */

@@ -13,6 +13,7 @@
  */
 
 import { PLANT_SPECIES, Plant, PlantField } from './src/plants.js';
+import { CONFIG } from './src/config.js';
 
 let PASS = 0, FAIL = 0;
 const FAILS = [];
@@ -364,6 +365,64 @@ const ptsOf = (c, op) => c._rec.pts.filter(p => (op ? p.op === op : true) && Num
     if (bw >= bh * 2.2) flat++;
   }
   ok(`叶片"扁而横" ${flat}/${N}（宽 ≥ 厚 × 2.2）`, flat === N, `${flat}/${N}`);
+}
+
+// ══════════════════════════════════════════════════════════
+//  9) 浮叶被生物推开：必须"同一水层"才算碰到 + 纵向不许跳（阶段 8-⑧）
+//     用户："龟龟和魚魚遇到荷叶杆会改变运动状态，这个可以改一下，因为侧视图
+//            他们不一定撞到杆了，只是从后面正常经过，即使撞到了也不要突然在
+//            Z 轴上快速移动。"
+//     侧视剖面里"从后面经过"= 生物在水面以下较深处游过，屏幕投影虽然重叠，
+//     但不在同一水层，不该有任何作用。这就是可测版本。
+// ══════════════════════════════════════════════════════════
+{
+  const W = makeWorld();
+  const srf = W.surfaceAt(W.w * 0.5);
+  const band = CONFIG.plants?.leafTouchBand ?? 14;
+  const offY = CONFIG.plants?.leafOffY ?? 3;
+
+  // ① 生物在荷叶**下方很深处**经过（从"后面"经过）→ 完全推不动它
+  {
+    const p = new Plant(W, PLANT_SPECIES.lilypad, 'surface');
+    p.x = W.w * 0.5; p.y = srf + 2;
+    for (let i = 0; i < 120; i++) p.update(1 / 60, i * 0.016, [{ x: p.x, y: srf + 200, size: 34 }]);
+    ok('生物在荷叶下方 200px 经过 → 浮叶纹丝不动',
+      Math.abs(p.ox) < 0.01 && Math.abs(p.oy) < 0.01,
+      `ox=${p.ox.toFixed(3)} oy=${p.oy.toFixed(3)}`);
+  }
+
+  // ② 生物贴着水面从旁边挤过 → 被**横向**推开，纵向几乎不动
+  {
+    const p = new Plant(W, PLANT_SPECIES.lilypad, 'surface');
+    p.x = W.w * 0.5; p.y = srf + 2;
+    for (let i = 0; i < 120; i++) p.update(1 / 60, i * 0.016, [{ x: p.x - 10, y: srf + 2, size: 34 }]);
+    ok('生物贴水面挤过 → 浮叶被横向推开（还在互动）', Math.abs(p.ox) > 1, `ox=${p.ox.toFixed(2)}`);
+    ok(`同一过程纵向漂移 ≤${offY}px（浮叶不会"跳起来"）`, Math.abs(p.oy) <= offY + 0.01,
+      `oy=${p.oy.toFixed(2)}`);
+  }
+
+  // ③ 极端：8 只生物在同一层往同一个方向猛挤 → 纵向仍被限幅
+  {
+    const p = new Plant(W, PLANT_SPECIES.lilypad, 'surface');
+    p.x = W.w * 0.5; p.y = srf + 2;
+    const mob = [];
+    for (let k = 0; k < 8; k++) mob.push({ x: p.x + (k - 4) * 5, y: srf - 5, size: 34 });
+    for (let i = 0; i < 600; i++) p.update(1 / 60, i * 0.016, mob);
+    ok(`8 只生物同层猛挤 10 秒 → 纵向仍被限死在 ${offY}px 内`, Math.abs(p.oy) <= offY + 0.01,
+      `oy=${p.oy.toFixed(2)}`);
+    const offX = CONFIG.plants?.leafOff ?? 22;
+    ok(`横向漂移也被限幅在 ${offX}px 内`, Math.abs(p.ox) <= offX + 0.01, `ox=${p.ox.toFixed(2)}`);
+  }
+
+  // ④ 判定阈值本身：band 之外的深度一律不算接触（防以后有人把 band 调大回去）
+  {
+    const p = new Plant(W, PLANT_SPECIES.lilypad, 'surface');
+    p.x = W.w * 0.5; p.y = srf + 2;
+    const justOutside = srf + band + 20 + 10;      // 比 band + 半个身位再深一点
+    for (let i = 0; i < 120; i++) p.update(1 / 60, i * 0.016, [{ x: p.x, y: justOutside, size: 34 }]);
+    ok(`离水线 ${(band + 30).toFixed(0)}px 的生物不算接触（band=${band}）`,
+      Math.abs(p.ox) < 0.01, `ox=${p.ox.toFixed(3)}`);
+  }
 }
 
 // ══════════════════════════════════════════════════════════
