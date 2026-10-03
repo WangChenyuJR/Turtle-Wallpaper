@@ -24,7 +24,7 @@
     "text": "乌龟总数",
     "value": 2,
     "min": 0,
-    "max": 6,
+    "max": 20,
     "step": 1
   },
   "longevity": {

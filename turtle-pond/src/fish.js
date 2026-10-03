@@ -134,6 +134,7 @@ export class Fish {
         // 有的合群、有的独来独往：感知半径与三个权重逐条不同
         percScale: R(0.70, 1.30),
         sepScale: R(0.80, 1.40),
+        spcScale: R(0.75, 1.25),
         aliScale: R(0.45, 1.15),
         cohScale: R(0.15, 0.85),
         // 随机游走：幅度与漂移速度都不同 → 方向不会同步
@@ -172,39 +173,75 @@ export class Fish {
     const calm = 1 - (1 - (CONFIG.plants?.shelterCalm ?? 0.4)) * T.shelterMix;
     this.sheltered = T.shelterMix > 0.5;
 
-    // ── Boids 三力 ─────────────────────────────────────
+    // ── Boids 三力 + 两个尺度的「排斥」────────────────────
+    // ⚠️ 8-⑧ 修掉一个隐蔽 bug：老写法 `sepX -= (o.x−this.x)/d²` **没有归一化**，
+    //    量级只有 1/d（20px 处 ≈ 0.05），而 `limit()` 是"只封顶、不放大" ——
+    //    于是"分离力"实际上一直是 0，separationForce 怎么调都没用，
+    //    鱼贴到 1px 也不会被推开（对照实测：120 秒后最近邻 1px、全池重叠成一个点）。
+    // 现在改成**两个尺度、都先把方向归一化再乘强度**：
+    //    ① 贴身排斥 `separation`（默认 10px，强度 1.0）—— 防止完全重叠；
+    //    ② 个人空间 `spacing`（默认 62px，强度 0.5）—— 温和互斥，防止挤成一坨。
+    // 两者**都只是转向力（软）**，没有任何位置级硬推 ——
+    // 侧视图里"能不能重叠"看的是有没有硬推，所以鱼依然可以短暂擦身而过。
     let sepX = 0, sepY = 0, sepN = 0;
+    let spcX = 0, spcY = 0, spcN = 0;
     let aliX = 0, aliY = 0, aliN = 0;
     let cohX = 0, cohY = 0, cohN = 0;
 
-    // 感知半径与分离距离逐条不同（一样的话必然同步成一个团）
+    // 感知半径 / 两个排斥半径逐条不同（完全一样必然同步成一个团）
     const perc = F.perception * T.percScale;
     const perc2 = perc * perc;
     const sepR = F.separation * T.sepScale;
     const sep2 = sepR * sepR;
+    const spcR = (F.spacing ?? 62) * T.spcScale;
+    const spc2 = spcR * spcR;
+    const range2 = perc2 > spc2 ? perc2 : spc2;   // 个人空间可能比感知半径还大
 
     for (const o of fishes) {
       if (o === this || o.dead || o.dying) continue;
       const d2 = dist2(this.x, this.y, o.x, o.y);
-      if (d2 > perc2 || d2 === 0) continue;
+      if (d2 > range2 || d2 === 0) continue;
 
-      // 分离
+      const d = Math.sqrt(d2);
+      // ① 贴身排斥：单位向量（**归一化是重点**，否则力小到等于没有）
       if (d2 < sep2) {
-        sepX -= (o.x - this.x) / d2;
-        sepY -= (o.y - this.y) / d2;
+        sepX -= (o.x - this.x) / d;
+        sepY -= (o.y - this.y) / d;
         sepN++;
       }
-      // 对齐
+      // ② 个人空间：越近越强，到半径边缘线性归零（软过渡，不会有硬边界）
+      if (d2 < spc2) {
+        const w = 1 - d / spcR;
+        spcX -= ((o.x - this.x) / d) * w;
+        spcY -= ((o.y - this.y) / d) * w;
+        spcN++;
+      }
+      if (d2 > perc2) continue;                   // 对齐/凝聚仍只认感知半径内
       aliX += o.vx; aliY += o.vy; aliN++;
-      // 凝聚
       cohX += o.x; cohY += o.y; cohN++;
     }
 
     if (sepN > 0) {
-      // 分离力倍率可调（阶段 8-⑧）：侧视图允许鱼群重叠，1.6 会把鱼硬弹开
-      // （另见阶段 8-⑧ 的一半改动：CONFIG.fish.separation 26→10 让鱼能错身重叠）
-      const s = limit(sepX / sepN, sepY / sepN, F.maxForce * (F.separationForce ?? 1.6) * T.sepScale);
-      ax += s.x; ay += s.y;
+      const m = Math.hypot(sepX, sepY);
+      if (m > 1e-6) {
+        const f = F.maxForce * (F.separationForce ?? 1.0) * T.sepScale;
+        ax += (sepX / m) * f; ay += (sepY / m) * f;
+      }
+    }
+    if (spcN > 0) {
+      const m = Math.hypot(spcX, spcY);
+      if (m > 1e-6) {
+        // 门控：邻居太少时**不出力**（只有一两条鱼相遇就该能擦身/重叠过去），
+        // 数量上去（真要扎堆了）才出全力。`spacingEdge` = 达到满力所需的邻居数。
+        // 这是"能重叠"(8-⑧) 与 "别黏成一团"(8-⑪) 两个诉求的调和点：
+        // 前者管"偶尔相遇"，后者管"持续成团"，靠邻居数区分。
+        const edge = Math.max(2, F.spacingEdge ?? 3);
+        const gate = clamp((spcN - 1) / (edge - 1), 0, 1);
+        if (gate > 0) {
+          const f = F.maxForce * (F.spacingForce ?? 0.5) * T.spcScale * gate;
+          ax += (spcX / m) * f; ay += (spcY / m) * f;
+        }
+      }
     }
     if (aliN > 0) {
       const s = limit(aliX / aliN - this.vx, aliY / aliN - this.vy, F.maxForce * 0.7 * T.aliScale);

@@ -115,10 +115,15 @@ function turn(set, seed) {
     `${tOn.toFixed(0)}° vs ${tOff.toFixed(1)}°`);
 }
 
-// ── F. 鱼群不再黏成一团（阶段 8-⑧ 用户："鱼儿们老是过一会儿就黏成一团"）──
-// 指标：平均最近邻距离 + "≥60% 的鱼挤在同一个 120px 圆内"的帧占比。
-// ⚠️ 用**开关对照**而不是绝对阈值：随机行为换台机器/换随机源也不会概率性失败。
-console.log('\n=== F. 鱼群聚集度（14 条鱼 / 3 分钟）===');
+// ── F. 鱼群不再黏成一团（阶段 8-⑧ / 8-⑪）──
+// ⚠️ 这里是**第三版**指标，前两版都交过学费：
+//    v1「120px 圆里挤了 60% 的鱼」→ 14 条分成两三团时**永不触发**，PASS 了但用户仍看到团。
+//    v2「横向散度」→ 只能区分"有没有随机游走"，**区分不出排布力**（实测老行为 484px vs
+//       有排布力 489px，几乎一样）。换指标后必须重新验证它在新机制下还有没有区分度！
+//    v3（本版）「拥挤帧占比」—— 采样帧中"14 条里有 >7 条挤在同一个 120px 圆内"的比例。
+//       实测：8-⑧ 老行为 83% / 只改 roamRadius 48% / 只加排布力 42% / **两者齐上 5%**。
+//       这才是"看起来是不是一团"的直接量。
+console.log('\n=== F. 鱼群聚集度（14 条鱼 / 10 分钟）===');
 function crowd(set, seed) {
   const rnd = Math.random;
   Math.random = seededRandom(seed);
@@ -127,40 +132,42 @@ function crowd(set, seed) {
   const world = new World(1920, 1080);
   const fishes = [];
   for (let i = 0; i < CONFIG.fish.count; i++) fishes.push(new Fish(world));
-  let frames = 0, cluster = 0, nnSum = 0;
-  for (let s = 0; s < 60 * 180; s++) {
+  const n = fishes.length;
+  const tightTh = Math.ceil(n * 0.5);
+  let frames = 0, tight = 0, nnSum = 0;
+  for (let s = 0; s < 60 * 600; s++) {
     for (const f of fishes) f.lightLevel = 1;
     for (const f of fishes) f.flock(fishes, CUR, [], DT, null);
     for (const f of fishes) f.update(DT);
-    if (s % 30) continue;
+    if (s % 150) continue;                        // 每 2.5s 采样
     frames++;
-    let nn = 0, maxIn = 0;
+    let nn = 0, inMax = 0;
     for (const a of fishes) {
-      let best = Infinity, c = 1;
+      let best = Infinity, c = 0;
       for (const b of fishes) {
         if (a === b) continue;
         const d = Math.hypot(a.x - b.x, a.y - b.y);
         if (d < best) best = d;
         if (d < 120) c++;
       }
-      nn += best; maxIn = Math.max(maxIn, c);
+      nn += best;
+      if (c > inMax) inMax = c;
     }
-    nnSum += nn / fishes.length;
-    if (maxIn >= Math.ceil(fishes.length * 0.6)) cluster++;
+    nnSum += nn / n;
+    if (inMax > tightTh) tight++;
   }
   Object.assign(CONFIG.fish, saved);
   Math.random = rnd;
-  return { nn: nnSum / frames, cluster: cluster / frames };
+  return { tight: tight / frames * 100, nn: nnSum / frames };
 }
 {
-  const off = crowd({ wander: false, roam: false, depthPull: 0, crowdN: 1e9 }, 4242);
-  const on = crowd({ wander: true, roam: true, depthPull: 0.14, crowdN: 5 }, 4242);
-  check('关掉随机项时确实会抱团（复现用户现象）', off.cluster >= 0.15,
-    `≥60% 抱团帧 ${(off.cluster * 100).toFixed(1)}%`);
-  check('全开后基本不再抱团（≤10%）', on.cluster <= 0.10,
-    `≥60% 抱团帧 ${(on.cluster * 100).toFixed(1)}%`);
-  check('全开后平均最近邻 ≥ 关掉时的 1.5 倍', on.nn >= off.nn * 1.5,
-    `${on.nn.toFixed(1)}px vs ${off.nn.toFixed(1)}px`);
+  // 老行为 = 8-⑧ 原样：漫游只在附近打转、没有个人空间力
+  const old = crowd({ roamRadius: 200, spacing: 0, spacingForce: 0 }, 20261003);
+  const on = crowd({}, 20261003);                 // 直接读 CONFIG.fish 当前值
+  check('老行为确实老是一团（复现用户现象）', old.tight >= 50, `拥挤帧 ${old.tight.toFixed(0)}%`);
+  check('现在拥挤帧 ≤ 20%（实测 5%）', on.tight <= 20, `拥挤帧 ${on.tight.toFixed(0)}%`);
+  check('拥挤帧至少降 5 倍', old.tight >= on.tight * 5,
+    `${old.tight.toFixed(0)}% → ${on.tight.toFixed(0)}%`);
 }
 
 console.log(`\n=== 合计：通过 ${pass} / 失败 ${fail} ===`);
