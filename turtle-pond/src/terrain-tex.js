@@ -177,4 +177,34 @@ export function tileTexture(ctx, tex, x, y, w, h, offsetX = 0, offsetY = 0, alph
   ctx.restore();
 }
 
+/**
+ * 同 tileTexture，但支持**纵向渐显**：纹理从 y=fadeTop（alpha 0）到
+ * y=fadeBottom（alpha 满档）线性淡入 —— 用于淤积纹理在泥面附近的软过渡，
+ * 消除"纹理从某一行突然开始"的横向接缝。
+ * 实现：把每块瓦片按 16px 高的横条切片，逐条按中点高度缩放 alpha。
+ */
+export function tileTextureFaded(ctx, tex, x, y, w, h, offsetX, offsetY, alpha,
+  fadeTop, fadeBottom) {
+  const s = tex.width;
+  const ox = ((offsetX % s) + s) % s;
+  const oy = ((offsetY % s) + s) % s;
+  const span = Math.max(1, fadeBottom - fadeTop);
+  ctx.save();
+  for (let ty = y - oy; ty < y + h; ty += s) {
+    for (let tx = x - ox; tx < x + w; tx += s) {
+      for (let sy = 0; sy < s; sy += 16) {
+        const yy = ty + sy;
+        if (yy >= y + h) break;
+        const t = (yy + 8 - fadeTop) / span;         // 该横条中点的渐显系数
+        const a = alpha * Math.max(0, Math.min(1, t));
+        if (a <= 0.012) continue;
+        ctx.globalAlpha = a;
+        const sh = Math.min(16, s - sy);
+        ctx.drawImage(tex, 0, sy, s, sh, tx, yy, s, sh);
+      }
+    }
+  }
+  ctx.restore();
+}
+
 export const TERRAIN_TEX_INTERNALS = { hash2, valueNoise, fbm };
