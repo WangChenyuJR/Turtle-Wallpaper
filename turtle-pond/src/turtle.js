@@ -22,6 +22,7 @@ import { CONFIG } from './config.js';
 import { rand, randInt, dist2, clamp, pick } from './utils.js';
 import { pickTurtleSpecies, turtleBehavior, HABITAT_LABELS } from './species.js';
 import { drawSideTurtle, turtleArt } from './creature-art.js';
+import { TurtleSprites } from './turtle-sprite.js';
 
 const STATE = {
   SWIM: 'swim',
@@ -659,6 +660,9 @@ export class Turtle {
     const depthShrink = 1 - this.depth * 0.16;
     const S = this.size * (CONFIG.art?.turtleScale ?? 0.72) * depthShrink;
 
+    // AI 拆件骨骼精灵（explode rig）：就绪则优先使用；未加载/失败 → 降级程序化画法 drawSideTurtle
+    const sprite = TurtleSprites.get(this.species.id, 'side');
+
     ctx.save();
     if (this.dying) {
       const D = CONFIG.life?.dyingDuration ?? 3.0;
@@ -669,7 +673,9 @@ export class Turtle {
     if (this.dying) {
       ctx.scale(this.facing || 1, -1);
       ctx.rotate(Math.sin(this.flipperPhase * 0.8) * 0.05);
-      drawSideTurtle(ctx, S, this.flipperPhase * 0.3, { ...P, shadow: false });
+      // 精灵版不传 alpha（外层 globalAlpha 已生效）；x/y=0 复用外层已完成的 translate/scale/rotate
+      if (sprite) sprite.draw(ctx, { x: 0, y: 0, size: S, state: 'idle', phase: this.flipperPhase * 0.3, tailPhase: this.flipperPhase * 0.15 });
+      else drawSideTurtle(ctx, S, this.flipperPhase * 0.3, { ...P, shadow: false });
     } else {
       ctx.scale(this.facing || 1, 1);
       ctx.rotate(this.pitch + this.roll * 0.5);
@@ -684,7 +690,15 @@ export class Turtle {
       const bob = paddling && this.vertState === 0
         ? Math.sin(this.headBob * 1.3) * S * 0.035 * (1 - this.depth) : 0;
       ctx.translate(0, bob);
-      drawSideTurtle(ctx, S, ph, { ...P, legAmp });
+      if (sprite) {
+        sprite.draw(ctx, {
+          x: 0, y: 0, size: S,
+          state: paddling ? 'swim' : 'walk',
+          phase: ph, tailPhase: ph * 0.5, legAmp,
+        });
+      } else {
+        drawSideTurtle(ctx, S, ph, { ...P, legAmp });
+      }
     }
     ctx.restore();
 

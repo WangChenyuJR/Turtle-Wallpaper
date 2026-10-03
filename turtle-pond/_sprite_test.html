@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>龟龟骨骼装配预览 · 6 种</title>
+<style>
+  body { margin: 0; background: #1b2a30; color: #cfe3e8; font: 14px/1.6 system-ui, "Microsoft YaHei", sans-serif; }
+  header { padding: 12px 20px; }
+  .row { display: flex; gap: 16px; padding: 0 20px 20px; flex-wrap: wrap; }
+  .panel { background: #22363d; border-radius: 12px; padding: 12px 16px; }
+  canvas { background: #16333c; border-radius: 10px; display: block; }
+  button { background: #2e4b54; color: #cfe3e8; border: 0; border-radius: 8px; padding: 6px 14px; margin: 2px; cursor: pointer; }
+  button.on { background: #e8a94e; color: #223; font-weight: 600; }
+  label { display: inline-block; margin: 4px 10px 0 0; }
+  input[type=range] { vertical-align: middle; width: 140px; }
+  .tip { color: #8fb4bd; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <b>龟龟骨骼装配预览</b> — AI 拆件 + 程序化关节动画（爆炸图 rig，6 种全量）
+  <div class="tip">状态机四态：swim 游泳（前爪划水+尾摆）/ walk 爬行（对角步态）/ idle 待机（呼吸）/ eat 吃龟粮（伸颈喙食+咬合）。长大 = size 滑条 + 幼体大头 headScale。</div>
+</header>
+<div class="row">
+  <div class="panel" style="flex:1 0 100%">
+    <b>品种：</b><span id="speciesBtns"></span>
+  </div>
+  <div class="panel">
+    <div>俯视 <button data-view="top" data-st="swim" class="on">游泳</button><button data-view="top" data-st="walk">爬行</button><button data-view="top" data-st="idle">待机</button><button data-view="top" data-st="eat">吃龟粮</button></div>
+    <canvas id="cvTop" width="420" height="420"></canvas>
+  </div>
+  <div class="panel">
+    <div>侧视 <button data-view="side" data-st="swim" class="on">游泳</button><button data-view="side" data-st="walk">爬行</button><button data-view="side" data-st="idle">待机</button><button data-view="side" data-st="eat">吃龟粮</button></div>
+    <canvas id="cvSide" width="520" height="420"></canvas>
+  </div>
+  <div class="panel" style="min-width:230px">
+    <div><b>参数</b></div>
+    <label>速度 <input id="speed" type="range" min="0" max="1" step="0.05" value="0.7"></label>
+    <label>体型(长大) <input id="size" type="range" min="60" max="220" step="5" value="130"></label>
+    <label>幼体大头 <input id="head" type="range" min="1" max="1.25" step="0.01" value="1.08"></label>
+    <div class="tip">体型越小头比例越大 → 模拟幼龟→成龟。</div>
+  </div>
+</div>
+<script type="module">
+  import { TurtleSprite, SPRITE_SPECIES } from './src/turtle-sprite.js';
+
+  const CN = {
+    yellowthroat: '黄喉拟水龟', helmetedSideNeck: '沼泽侧颈龟', caramelSlider: '焦糖巴西龟',
+    goldLineReeves: '金线草龟', redbellySideNeck: '圆澳侧颈龟', terrapin: '北部钻纹龟',
+    redear: '巴西红耳龟', yellowpond: '黄缘闭壳龟', chinese: '中华草龟',
+    softshell: '甲鱼', mapTurtle: '地图龟', mata: '枯叶龟', burmese: '缅甸陆龟',
+  };
+
+  let cur = 'yellowthroat';
+  const states = { top: 'swim', side: 'swim' };
+  const cache = {};          // species -> {top, side}
+  let t0 = performance.now();
+
+  async function ensure(sp) {
+    if (cache[sp]) return cache[sp];
+    const pair = {};
+    for (const view of ['top', 'side']) {
+      pair[view] = await new TurtleSprite({ species: sp, view }).load();
+    }
+    cache[sp] = pair;
+    return pair;
+  }
+
+  // 品种按钮
+  const btnBox = document.getElementById('speciesBtns');
+  for (const sp of SPRITE_SPECIES) {
+    const b = document.createElement('button');
+    b.textContent = CN[sp] || sp;
+    b.dataset.sp = sp;
+    if (sp === cur) b.classList.add('on');
+    b.addEventListener('click', async () => {
+      cur = sp;
+      btnBox.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+      await ensure(sp);
+    });
+    btnBox.appendChild(b);
+  }
+
+  document.querySelectorAll('button[data-view]').forEach(b => b.addEventListener('click', () => {
+    const v = b.dataset.view;
+    states[v] = b.dataset.st;
+    document.querySelectorAll(`button[data-view="${v}"]`).forEach(x => x.classList.toggle('on', x === b));
+  }));
+
+  function frame(now) {
+    const t = (now - t0) / 1000;
+    const speed = +document.getElementById('speed').value;
+    const size = +document.getElementById('size').value;
+    const headScale = +document.getElementById('head').value;
+    const pair = cache[cur];
+
+    if (pair) {
+      // 俯视
+      const c1 = document.getElementById('cvTop').getContext('2d');
+      c1.clearRect(0, 0, 420, 420);
+      pair.top.draw(c1, { x: 210, y: 210, size, angle: -Math.PI / 2 + Math.sin(t * 0.6) * 0.25,
+        time: t, state: states.top, speed, headScale });
+
+      // 侧视（游动时上下起伏；吃食时抬头向水面）
+      const c2 = document.getElementById('cvSide').getContext('2d');
+      c2.clearRect(0, 0, 520, 420);
+      const bobY = states.side === 'swim' ? Math.sin(t * 1.7) * 8 : 0;
+      const neckExt = states.side === 'eat' ? 0.5 + 0.5 * Math.sin(t * 2.2) : 0;
+      const bite = states.side === 'eat' ? (Math.sin(t * 2.2) > 0.86 ? 1 : 0) : 0;
+      pair.side.draw(c2, { x: 250, y: 230 + bobY, size, angle: 0,
+        time: t, state: states.side, speed, neckExt, bite, headScale });
+
+      // 吃食画一粒浮面饲料（示意）
+      if (states.side === 'eat') {
+        c2.fillStyle = '#e8c86a';
+        c2.beginPath(); c2.arc(330, 140, 5, 0, 7); c2.fill();
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  ensure(cur);
+  requestAnimationFrame(frame);
+</script>
+</body>
+</html>

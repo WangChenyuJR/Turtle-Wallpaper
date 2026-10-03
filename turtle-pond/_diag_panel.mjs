@@ -1,16 +1,20 @@
 /**
- * 纯 Node 回归：生物信息面板（点击乌龟弹不出信息）
+ * 纯 Node 回归：生物信息面板（点击乌龟弹不出信息 / 详情页三视图用哪套美术）
  *
  * 不开浏览器、不渲染。用 Proxy 假造 canvas 2d 上下文，
  * 直接调 CreaturePanel._setVector，验证：
  *   A. 传选择器字符串不再抛错（修复点）
  *   B. 确实往 canvas 里画了东西（不是静默跳过）
  *   C. 选择器没命中时静默返回，不炸
- *   D. 全品种遍历：19 种龟 + 全部鱼都能画出来
+ *   D. 全品种遍历：龟/鱼都能画出来（精灵未就绪 → 降级程序化画法）
+ *   D2. 精灵就绪后，龟两格改走 AI 拆件绘制（drawImage 次数 = 部件数）
  *
  * 跑法： node _diag_panel.mjs
  */
+import fs from 'fs';
+import path from 'path';
 import { CreaturePanel } from './src/panel.js';
+import { TurtleSprites } from './src/turtle-sprite.js';
 import { TURTLE_SPECIES, FISH_SPECIES } from './src/species.js';
 
 let pass = 0, fail = 0;
@@ -48,7 +52,43 @@ function makePanel(stubs) {
   const p = Object.create(CreaturePanel.prototype);   // 跳过构造函数（不需要 DOM）
   p.el = { querySelector: (sel) => stubs[sel] ?? null };
   p._imgCache = new Map();
+  p._lazyTried = new Set();   // 构造函数里初始化的字段，桩必须一并镜像（否则 _lazySprite 崩）
   return p;
+}
+
+// ── 精灵注册表：用桩加载全部品种（与 _diag_sprite.mjs 同款桩）──
+const SPRITE_DIR = 'assets/creatures/turtle/sprites';
+const readJSON = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
+
+async function preloadSpriteRegistry() {
+  // 前面的降级用例里，面板的按需加载用真实 fetch 打过一遍（Node 里相对 URL 必然失败）。
+  // 先排空一轮事件循环，等那些失败回调全部落地，再清表重载——
+  // 否则迟到的 catch 会把刚用桩加载好的 key 又标成 'failed'。
+  await new Promise((r) => setTimeout(r, 0));
+  TurtleSprites._map.clear();
+  TurtleSprites._jobs.clear();
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (u) => {
+    const m = u.replace(/\\/g, '/').match(/sprites\/([^/]+)\/(top|side)\//);
+    return { json: async () => readJSON(path.join(SPRITE_DIR, m[1], m[2], 'manifest.json')) };
+  };
+  const loadImage = (url) => {
+    const mm = url.replace(/\\/g, '/').match(/sprites\/([^/]+)\/(top|side)\/([^/]+)$/);
+    const manifest = readJSON(path.join(SPRITE_DIR, mm[1], mm[2], 'manifest.json'));
+    const entry = Object.values(manifest.parts).find(p => p.file === mm[3]);
+    if (!entry) return Promise.reject(new Error('no part ' + mm[3]));
+    return Promise.resolve({
+      width: entry.bbox[2] - entry.bbox[0] + 1,
+      height: entry.bbox[3] - entry.bbox[1] + 1,
+      img: { _name: mm[3] },
+    });
+  };
+  try {
+    await TurtleSprites.preload(Object.keys(TURTLE_SPECIES), ['top', 'side'], { loadImage });
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+  return TurtleSprites;
 }
 
 const inst = (species, artSeed = 7) => ({ species, artSeed, x: 100, y: 100, size: 20 });
@@ -113,8 +153,46 @@ console.log('\n=== D. 全品种遍历：每种龟/鱼的三视图都能画 ===')
     try { p._setVector('.cp-cv-top', f, 'top'); p._setVector('.cp-cv-side', f, 'side'); }
     catch (e) { badF.push(`${id}:${e.message}`); }
   }
-  ok(badT.length === 0, `全部 ${turtleIds.length} 种龟三视图绘制无异常`, badT.join(' '));
+  ok(badT.length === 0, `全部 ${turtleIds.length} 种龟三视图绘制无异常（精灵未就绪 → 降级程序化画法）`, badT.join(' '));
   ok(badF.length === 0, `全部 ${fishIds.length} 种鱼三视图绘制无异常`, badF.join(' '));
+}
+
+console.log('\n=== D2. 精灵就绪后：龟两格改走 AI 拆件绘制（详情页用新美术） ===');
+{
+  const reg = await preloadSpriteRegistry();
+  const turtleIds = Object.keys(TURTLE_SPECIES);
+  const bad = [];
+  let checked = 0;
+  for (const id of turtleIds) {
+    const sp = TURTLE_SPECIES[id];
+    if (!reg.get(sp.id, 'top')?.ready || !reg.get(sp.id, 'side')?.ready) { bad.push(`${id}:素材未就绪`); continue; }
+    for (const view of ['top', 'side']) {
+      const cv = makeCanvas();
+      const stubs = { '.cp-cv-top': cv, '.cp-cv-side': cv };
+      const p2 = makePanel(stubs);
+      const t = inst(sp);
+      p2.app = { turtles: [t], fishes: [] };
+      try { p2._setVector(view === 'top' ? '.cp-cv-top' : '.cp-cv-side', t, view); }
+      catch (e) { bad.push(`${id}/${view}:${e.message}`); continue; }
+      const nDraw = cv._calls.drawImage;
+      const expect = Object.keys(reg.get(sp.id, view).parts).length;
+      if (nDraw !== expect) bad.push(`${id}/${view}:drawImage=${nDraw}≠${expect}`);
+      else checked++;
+    }
+  }
+  ok(bad.length === 0, `${checked} 格全部按部件数绘制（drawImage = 部件数，未走程序化画法）`, bad.join(' '));
+  // 精灵路径不再依赖 artSeed（个体差异只在池塘动画里，图鉴格是同一套素材）
+  const cv1 = makeCanvas(), cv2 = makeCanvas();
+  const p3 = makePanel({ '.cp-cv-side': cv1 }), p4 = makePanel({ '.cp-cv-side': cv2 });
+  const sp0 = TURTLE_SPECIES[Object.keys(TURTLE_SPECIES)[0]];
+  for (const [p, seed] of [[p3, 1], [p4, 999]]) {
+    const t = { ...inst(sp0, seed) };
+    p.app = { turtles: [t], fishes: [] };
+    p._setVector('.cp-cv-side', t, 'side');
+  }
+  ok(cv1._calls.drawImage === cv2._calls.drawImage && cv1._calls.drawImage > 0,
+    '不同 artSeed 的同类个体 → 图鉴格绘制一致（同一套精灵素材）',
+    `drawImage ${cv1._calls.drawImage}/${cv2._calls.drawImage}`);
 }
 
 console.log('\n=== E. 面板静态资料表覆盖检查（只影响文案，不崩） ===');
@@ -199,8 +277,10 @@ console.log('\n=== F. 端到端（假 DOM）：点中乌龟能真正打开面板
   ok(!err, 'handleCanvasClick → select() 全程无异常', err ? `${err.constructor.name}: ${err.message}` : '');
   ok(panel.selected === t, '选中了个体');
   ok(panelEl.classList.contains('cp-open'), '面板加上了 cp-open（= 真的弹出来了）');
-  ok(cvTop._calls.fill > 5 && cvSide._calls.fill > 5, '面板里两格三视图都画了东西',
-    `top.fill=${cvTop._calls.fill} side.fill=${cvSide._calls.fill}`);
+  // 画了东西即可：精灵路径 = drawImage（部件拼装），降级路径 = fill/stroke（程序化矢量）
+  const ink = (c) => c.drawImage + c.fill + c.stroke;
+  ok(ink(cvTop._calls) > 5 && ink(cvSide._calls) > 5, '面板里两格三视图都画了东西',
+    `top=${ink(cvTop._calls)}(drawImage=${cvTop._calls.drawImage}) side=${ink(cvSide._calls)}(drawImage=${cvSide._calls.drawImage})`);
   ok(nameInput.value === '巴西红耳龟', '名字框填了默认名', nameInput.value);
   ok(t._uid > 0, '分配了持久化 uid', `uid=${t._uid}`);
 

@@ -29,6 +29,12 @@ turtle-pond/_shot_*.html
 # ── 参考素材（用户提供的第三方图片，仅作风格分析，不入库）──
 ref-turtle-cartoon/
 
+# ── AI 生成过程产物（体积大，不入库；成品部件已单独入库）──
+# _gen/ 存放重生成用的姿势图原图与旧图备份；turtle-cute-portraits* 是立绘看板及其 53MB 生成历史
+turtle-pond/_gen/
+turtle-cute-portraits_assets/
+turtle-cute-portraits.miora
+
 # ── 编辑器与系统 ──
 .vscode/
 .idea/

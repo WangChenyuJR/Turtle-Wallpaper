@@ -29,6 +29,7 @@ import { CreaturePanel } from './panel.js';
 import { SpeciesPicker } from './species-picker.js';
 import { SaveManager, SAVE_KEY, SCHEMA as SAVE_SCHEMA } from './save.js';
 import { runSelfTest, drawTestBadge } from './selftest.js';
+import { TurtleSprites, SPRITE_SPECIES } from './turtle-sprite.js';
 import {
   DEFAULT_POPULATION, FISH_SPECIES, TURTLE_SPECIES,
   pickFishSpecies, pickTurtleSpecies, listSpecies, HABITAT_LABELS,
@@ -101,6 +102,9 @@ export class PondApp {
 
     this._initScene(population, opts.resume !== false);
     this._bindEvents();
+
+    // AI 拆件骨骼精灵：后台预加载全部有素材龟种的侧视部件（就绪前龟走旧程序化画法，无缝切换）
+    TurtleSprites.preload(SPRITE_SPECIES, 'side');
 
     requestAnimationFrame((t) => this._loop(t));
   }

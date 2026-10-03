@@ -8,9 +8,10 @@
  *   · 面板内名字可编辑，Enter 或失焦保存（localStorage 持久化）
  *
  * 图鉴三视图（阶段 5-⑬ 统一新画法）：
- *   · 俯视 / 侧视 —— creature-art.js 实时绘制（用该个体的 artSeed，与水塘里看到的一致）
- *   · 水彩参考    —— assets/creatures/{turtle|fish}/<id>_<top|side>.png，
- *                     只有部分品种有；加载成功才显示这一格，不影响前两格
+ *   · 俯视 / 侧视 —— 龟：AI 拆件骨骼精灵（turtle-sprite.js，与水塘里同一套素材、同一装配逻辑）
+ *                     缺素材/加载失败 → 降级 creature-art.js 程序化画法
+ *                     （侧视随池塘一起预载；俯视首次打开面板时按需加载，就绪后自动补画）
+ *   · 水彩参考    —— 仅鱼类：assets/creatures/fish/<id>_side.png（有图才亮这一格）
  *
  * 资料来源：./data/species-research.js 的 TURTLE_RESEARCH / FISH_RESEARCH
  */
@@ -20,6 +21,7 @@ import {
   drawSideTurtle, drawTopTurtle, drawSideFish, drawTopFish,
   turtleArt, fishArt,
 } from './creature-art.js';
+import { TurtleSprites, SPRITE_SPECIES } from './turtle-sprite.js';
 
 const STORE_NAMES = 'pond.names';   // { [uid]: name }
 const STORE_SEQ = 'pond.uidSeq';    // 递增计数器
@@ -93,6 +95,7 @@ export class CreaturePanel {
     this.selected = null;          // 当前选中的生物实例
     this._acc = 0;                 // 动态刷新节流
     this._imgCache = new Map();    // "kind:id:view" -> HTMLImageElement
+    this._lazyTried = new Set();   // `${species}/${view}` 已触发过按需加载（防失败时无限重试）
 
     this._loadStore();
     this._buildDOM();
@@ -150,8 +153,8 @@ export class CreaturePanel {
       </div>
       <div class="cp-tags"></div>
       <div class="cp-views">
-        <figure><canvas class="cp-cv-top" width="120" height="120"></canvas><figcaption class="cp-cap-top">俯视 Top</figcaption></figure>
-        <figure><canvas class="cp-cv-side" width="120" height="120"></canvas><figcaption>侧视 Side</figcaption></figure>
+        <figure><canvas class="cp-cv-top" width="240" height="240"></canvas><figcaption class="cp-cap-top">俯视 Top</figcaption></figure>
+        <figure><canvas class="cp-cv-side" width="240" height="240"></canvas><figcaption>侧视 Side</figcaption></figure>
         <figure class="cp-ref"><img class="cp-img-ref" alt=""/><figcaption>水彩参考</figcaption></figure>
       </div>
       <div class="cp-status"></div>
@@ -186,7 +189,7 @@ export class CreaturePanel {
   }
 
   // ── 图鉴绘制（阶段 5-⑬ 统一新画法）───────────────────
-  /** 每种画法的包围盒不同 → 各格单独定缩放与居中偏移（偏移单位 = 画法参数 s） */
+  /** 程序化画法（仅龟缺素材时的降级 + 鱼类）的缩放/居中偏移（偏移单位 = 画法参数 s） */
   static VIEW_GEO = {
     turtleSide: { scale: 0.42, cx: 0.30, cy: -0.03 },
     turtleTop:  { scale: 0.44, cx: 0.16, cy: 0 },
@@ -195,19 +198,21 @@ export class CreaturePanel {
   };
 
   /**
-   * 把该个体（按它的 artSeed，与水塘里看到的一致）画进图鉴格子
+   * 把该个体画进图鉴格子：龟优先走 AI 拆件精灵（新美术），缺素材则降级程序化画法
    * @param {HTMLCanvasElement|string} canvas 画布元素，或面板内的选择器（如 '.cp-cv-top'）
    */
   _setVector(canvas, inst, view) {
     if (typeof canvas === 'string') canvas = this.el.querySelector(canvas);
     if (!canvas) return;                            // 选择器没命中：静默跳过，别拖垮整个面板
     const ctx = canvas.getContext('2d');
-    const W = canvas.width;
-    ctx.clearRect(0, 0, W, canvas.height);
-    ctx.fillStyle = '#f4efe2';                      // 宣纸色衬底，与水彩参考衔接
-    ctx.fillRect(0, 0, W, canvas.height);
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#f4efe2';                      // 宣纸色衬底
+    ctx.fillRect(0, 0, W, H);
 
     const isTurtle = this.app.turtles.includes(inst);
+    if (isTurtle && this._drawSpriteView(ctx, inst, view, W, H)) return;
+
     const P = isTurtle
       ? turtleArt(inst.species, inst.artSeed ?? 0)
       : fishArt(inst.species, inst.artSeed ?? 0);
@@ -215,10 +220,38 @@ export class CreaturePanel {
     const S = W * geo.scale;
 
     ctx.save();
-    ctx.translate(W / 2 - S * geo.cx, canvas.height / 2 - S * geo.cy);
+    ctx.translate(W / 2 - S * geo.cx, H / 2 - S * geo.cy);
     if (isTurtle) (view === 'top' ? drawTopTurtle : drawSideTurtle)(ctx, S, 0.6, P);
     else (view === 'top' ? drawTopFish : drawSideFish)(ctx, S, 0.6, P);
     ctx.restore();
+  }
+
+  /**
+   * 用 AI 拆件精灵画一格（按并集包围盒自适应缩放居中）。
+   * 未就绪 → 触发一次按需加载并返回 false（本次先降级，就绪后自动补画）。
+   */
+  _drawSpriteView(ctx, inst, view, W, H) {
+    const id = inst.species.id;
+    const spr = TurtleSprites.get(id, view);
+    if (!spr) { this._lazySprite(inst, view); return false; }
+    const fit = spr.fitInto(W, H, 0.88);
+    if (!fit) return false;
+    // 侧视：素材头朝右（angle 0）；俯视：素材头朝上（angle 0 即头朝上）
+    spr.draw(ctx, { x: fit.x, y: fit.y, size: fit.size, angle: 0, state: 'idle', phase: 0, tailPhase: 0, headPhase: 0 });
+    return true;
+  }
+
+  /** 按需预载某个品种的某个视角；只尝试一次，就绪后若面板还停在该个体则补画 */
+  _lazySprite(inst, view) {
+    const id = inst.species.id;
+    if (!SPRITE_SPECIES.includes(id)) return;
+    const key = `${id}/${view}`;
+    if (this._lazyTried.has(key)) return;
+    this._lazyTried.add(key);
+    TurtleSprites.preload([id], view).then(() => {
+      if (this.selected !== inst) return;
+      this._setVector(view === 'top' ? '.cp-cv-top' : '.cp-cv-side', inst, view);
+    });
   }
 
   /** 水彩参考：assets 里有该品种的 PNG 才亮出这一格（不占无图品种的版面） */
@@ -263,10 +296,11 @@ export class CreaturePanel {
       tags.innerHTML = `<b>${sp.label}</b> · ${stage}`;
     }
 
-    // 图鉴三视图：俯视/侧视 = 新画法实时绘制（带该个体 artSeed）；水彩 = 有图才显示
+    // 图鉴三视图：龟的俯视/侧视 = AI 拆件精灵实时装配（新美术）；水彩参考格仅鱼类保留
     this._setVector('.cp-cv-top', inst, 'top');
     this._setVector('.cp-cv-side', inst, 'side');
-    this._setRef(inst, kind, sp.id);
+    if (kind === 'fish') this._setRef(inst, kind, sp.id);
+    else this.el.querySelector('.cp-views figure.cp-ref').classList.remove('cp-show');
 
     // 静态资料
     this._renderInfo(kind, sp);
