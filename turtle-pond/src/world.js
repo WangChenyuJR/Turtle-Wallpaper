@@ -28,7 +28,7 @@
 import { CONFIG } from './config.js';
 import { rand, randInt, clamp, blobShape, blobPath } from './utils.js';
 import { WaterWaveField } from './waterwave.js';
-import { makePondTextures, tileTexture } from './terrain-tex.js';
+import { makePondTextures, tileTexture, tileTextureFaded } from './terrain-tex.js';
 
 const smoothstep = (t) => {
   t = t < 0 ? 0 : t > 1 ? 1 : t;
@@ -810,6 +810,9 @@ export class World {
     this.footprints = []; // 岸上爬行脚印（阶段 5-⑭）
     this.wakeTrails = []; // 拖尾痕迹（阶段 8-④）：鼠标划过 / 生物游动身后留下的痕
     this.stirBits = [];   // 水下搅动粒子（阶段 8-④）：鼠标在深水推水翻起的泥沙与气泡
+    // 环境上升气泡（阶段 8-⑨）：池底偶发冒一串，升到水面"啵"一声破掉
+    this.ambBubbles = [];
+    this._ambBubT = 1 + Math.random() * 2;
   }
 
   // ════════════════════════════════════════════════════════
@@ -932,10 +935,12 @@ export class World {
     const rad = nat.waveCursorRadius ?? 1;
     if (!this.isWater(x1, y1)) return;
 
-    // 离水线太远 → 算水下，改走搅动（不在水面留痕）
+    // 离水线太远 → 算水下，改走搅动（不在水面留痕）。
+    // 阶段 8-⑨：由"事件点爆一坨"改成分段撒粒子 —— 拖拽轨迹沿线连续，
+    // 且粒子带上拖动方向的初速（真的是"被推开的水"），观感帧率随渲染帧走。
     const band = nat.wakeBand ?? 34;
     if (Math.abs(y1 - this.surfaceAt(x1)) > band) {
-      this.addUnderwaterStir(x1, y1, s * 1.3);
+      this.addUnderwaterStirLine(x0, y0, x1, y1, speed);
       return;
     }
 
@@ -1015,10 +1020,7 @@ export class World {
         r: rand(0.7, 2.2), life, maxLife: life, seed: rand(0, 6.28),
       });
     }
-    const cap = 260;
-    if (this.stirBits.length > cap) {
-      this.stirBits.splice(0, this.stirBits.length - cap);
-    }
+    this._capStirBits();
 
     // 水面影响极弱（指数随深度衰减）
     if (this.wave) {
@@ -1027,20 +1029,236 @@ export class World {
     }
   }
 
+  /**
+   * 分段水下搅动（阶段 8-⑨）—— 供**渲染帧驱动**的鼠标拖拽调用。
+   *
+   * 与 `addUnderwaterStir`（定点爆一坨）的区别：
+   *   · 粒子沿 [p0 → p1] 线段均匀撒开 —— 拖得越长，痕迹越长，不会断成一粒粒；
+   *   · 粒子初速带**拖动方向**的分量（速度越快推得越猛）—— 读起来是"手在推水"，
+   *     而不是"原地冒泡"；
+   *   · 每帧数量有上限，快拖也不会一帧塞爆粒子池。
+   */
+  addUnderwaterStirLine(x0, y0, x1, y1, speed = 0) {
+    const nat = CONFIG.natural ?? {};
+    if (nat.wake === false || nat.underwaterStir === false) return;
+    if (!this.isWater(x1, y1)) return;
+    const dist = Math.hypot(x1 - x0, y1 - y0);
+    if (dist < 0.5) return;
+    const k = (nat.stirStrength ?? 1) * clamp(0.4 + speed / 900, 0.4, 1.8);
+    const dirx = (x1 - x0) / dist, diry = (y1 - y0) / dist;
+    const push = clamp(speed * 0.07, 6, 85);      // 拖拽带起的水流初速（px/s）
+    const ux = this.isWater(x0, y0) ? x0 : x1;    // 起点落在岸上就从终点开始撒
+    const uy = this.isWater(x0, y0) ? y0 : y1;
+
+    const bn = Math.min(5, Math.max(1, Math.round((dist / 16) * k)));
+    for (let i = 0; i < bn; i++) {
+      const t = Math.random();
+      const life = rand(0.9, 1.8);
+      this.stirBits.push({
+        kind: 'bubble',
+        x: ux + (x1 - ux) * t + rand(-6, 6), y: uy + (y1 - uy) * t + rand(-4, 4),
+        vx: dirx * push * rand(0.3, 0.9) + rand(-12, 12),
+        vy: diry * push * rand(0.3, 0.9) - rand(16, 42),
+        r: rand(0.9, 2.6), life, maxLife: life, seed: rand(0, 6.28),
+      });
+    }
+    const sn = Math.min(7, Math.max(1, Math.round((dist / 11) * k)));
+    for (let i = 0; i < sn; i++) {
+      const t = Math.random();
+      const life = rand(0.7, 1.5);
+      this.stirBits.push({
+        kind: 'silt',
+        x: ux + (x1 - ux) * t + rand(-10, 10), y: uy + (y1 - uy) * t + rand(-3, 10),
+        vx: dirx * push * rand(0.4, 1.1) + rand(-20, 20),
+        vy: diry * push * rand(0.4, 1.1) - rand(6, 22),
+        r: rand(0.7, 2.2), life, maxLife: life, seed: rand(0, 6.28),
+      });
+    }
+    this._capStirBits();
+
+    // 水面影响极弱（指数随深度衰减）
+    if (this.wave) {
+      const d = Math.max(0, this.surfaceAt(x1) - y1);
+      this.wave.disturb(x1, 0, k * 0.06 * Math.exp(-d / 90), 3);
+    }
+  }
+
+  /** stirBits 粒子池上限（阶段 8-⑨：尾流也走这里，帽子放宽一点） */
+  _capStirBits() {
+    const cap = CONFIG.natural?.stirCap ?? 320;
+    if (this.stirBits.length > cap) {
+      this.stirBits.splice(0, this.stirBits.length - cap);
+    }
+  }
+
+  /**
+   * 游动尾流（阶段 8-⑨）—— 鱼 / 龟在水中游过时，身后留下**看得见的水流**：
+   *   · 一条向后飘散的短流痕（kind 'flow'：直线拉出、快速淡去）；
+   *   · 偶尔卷起一两粒小气泡（尾鳍/划水把空气卷进水里）。
+   * 由 main 侧按"每只生物自己的速度 × 累积器"逐帧调用，速度越快撒得越密。
+   * @param {number} x,y 生物当前位置
+   * @param {number} vx,vy 生物速度
+   * @param {number} size 生物体型（px）
+   * @param {'fish'|'turtle'} [kind] 龟更大更宽、气泡更多
+   */
+  addSwimTrail(x, y, vx, vy, size, kind = 'fish') {
+    const nat = CONFIG.natural ?? {};
+    if (nat.enabled === false || nat.swimTrail === false) return;
+    if (!this.isWater(x, y)) return;
+    const sp = Math.hypot(vx, vy);
+    if (sp < 6) return;
+    const isT = kind === 'turtle';
+    const ux = vx / sp, uy = vy / sp;
+    const body = isT ? size * 0.6 : size * 0.55;
+
+    // ① 流痕：贴在身后一点，沿行进方向的反向拉出一条淡亮水痕
+    const life = rand(0.4, 0.75);
+    this.stirBits.push({
+      kind: 'flow',
+      x: x - ux * body * rand(0.4, 0.9) + rand(-2, 2),
+      y: y - uy * body * rand(0.4, 0.9) + rand(-3, 3),
+      ang: Math.atan2(vy, vx),
+      len: clamp(sp * 0.10, 4, 22) * (isT ? 1.6 : 1),
+      wid: (isT ? 2.4 : 1.5) * clamp(size / 10, 0.5, 1.7),
+      vx: -vx * 0.10 + rand(-4, 4),
+      vy: -vy * 0.10 - rand(2, 7),
+      life, maxLife: life, seed: rand(0, 6.28),
+    });
+    // ② 尾流气泡：快游/大龟更容易卷气
+    const bubChance = nat.swimBubbleChance ?? (isT ? 0.22 : 0.09);
+    if (Math.random() < bubChance) {
+      const blife = rand(1.0, 2.0);
+      this.stirBits.push({
+        kind: 'bubble',
+        x: x - ux * body + rand(-3, 3), y: y - uy * body + rand(-2, 2),
+        vx: -ux * sp * 0.06 + rand(-6, 6),
+        vy: -uy * sp * 0.06 - rand(10, 26),
+        r: rand(0.7, isT ? 2.2 : 1.6), life: blife, maxLife: blife, seed: rand(0, 6.28),
+      });
+    }
+    this._capStirBits();
+  }
+
+  /**
+   * 换气气泡（阶段 8-⑨）—— 乌龟憋够了浮上来之前先吐一串泡，鱼偶尔也冒一粒。
+   * 位置取生物"嘴部"近似（体前侧），气泡大一点、带明显的上浮初速。
+   */
+  addBreathBubbles(x, y, size, facing = 1) {
+    const nat = CONFIG.natural ?? {};
+    if (nat.enabled === false || nat.breathBubbles === false) return;
+    if (!this.isWater(x, y)) return;
+    const n = 2 + Math.round(Math.random() * 2);
+    for (let i = 0; i < n; i++) {
+      const life = rand(1.4, 2.6);
+      this.stirBits.push({
+        kind: 'bubble',
+        x: x + facing * size * 0.55 + rand(-3, 3),
+        y: y - size * 0.2 + rand(-3, 1),
+        vx: facing * rand(2, 9) + rand(-3, 3),
+        vy: -rand(22, 40),
+        r: rand(1.3, 3.0), life, maxLife: life, seed: rand(0, 6.28),
+      });
+    }
+    this._capStirBits();
+  }
+
+  /**
+   * 环境上升气泡（阶段 8-⑨）—— 池底偶发冒一串小气泡，摇摇晃晃升到水面破掉：
+   * 破的时候给波场一个**极轻**的顶升 + 一圈很快消散的微涟漪，水面"活"但不闹。
+   */
+  _updateAmbientBubbles(dt) {
+    const nat = CONFIG.natural ?? {};
+    if (nat.ambientBubbles === false) return;
+    if (!this.ambBubbles) this.ambBubbles = [];
+
+    // 冒泡：每隔一阵在随机水列的池底冒 1~3 个
+    this._ambBubT = (this._ambBubT ?? 2) - dt;
+    if (this._ambBubT <= 0) {
+      const gapMin = nat.bubGapMin ?? 1.3, gapMax = nat.bubGapMax ?? 4.2;
+      this._ambBubT = rand(gapMin, gapMax);
+      const spans = this.waterSpans;
+      if (spans.length) {
+        const s = spans[Math.floor(Math.random() * spans.length)];
+        const x = rand(s.x0 + 8, Math.max(s.x0 + 9, s.x1 - 8));
+        const y0 = this.groundYAt(x) - rand(2, 8);
+        const n = 1 + (Math.random() < 0.35 ? 1 : 0) + (Math.random() < 0.12 ? 1 : 0);
+        for (let i = 0; i < n; i++) {
+          this.ambBubbles.push({
+            x: x + rand(-5, 5), y: y0 - i * rand(4, 9),
+            r: rand(1.2, 3.2),
+            vy: -rand(5, 12),
+            sway: rand(0, 6.28), swayAmp: rand(3, 9), swaySp: rand(1.4, 3.0),
+          });
+        }
+      }
+    }
+
+    // 上浮：浮力 ∝ 半径，终端速度随半径变大；到水面"啵"
+    for (let i = this.ambBubbles.length - 1; i >= 0; i--) {
+      const b = this.ambBubbles[i];
+      const term = -(16 + b.r * 4.5);
+      b.vy = Math.max(term, b.vy - 30 * dt);       // vy 负 = 向上，逐渐加速到终端速度
+      b.sway += b.swaySp * dt;
+      b.x += Math.sin(b.sway) * b.swayAmp * dt;
+      b.y += b.vy * dt;
+      const srf = this.surfaceAt(b.x) + 2;
+      if (b.y <= srf) {
+        // 破裂：极轻的水面顶升（强度 ∝ 半径）+ 一圈微涟漪
+        if (this.wave) this.wave.disturb(b.x, 0, Math.min(0.06, 0.016 * b.r), 1);
+        if (this.isWaterColumn(b.x)) {
+          this.ripples.push({
+            x: b.x, y: srf, r: 1, maxR: 3 + b.r * 2.6,
+            alpha: 0.13, speed: 26,
+          });
+          if (this.ripples.length > 24) this.ripples.shift();
+        }
+        this.ambBubbles.splice(i, 1);
+      }
+    }
+  }
+
+  /** 环境气泡绘制 —— 细圈 + 高光点，升得快时轻微拉长（水阻的椭圆感） */
+  _drawAmbientBubbles(ctx) {
+    if (!this.ambBubbles || !this.ambBubbles.length) return;
+    ctx.save();
+    this._waterPath(ctx);
+    ctx.clip();
+    for (const b of this.ambBubbles) {
+      const stretch = Math.min(0.45, Math.max(0, -b.vy / 90));
+      ctx.globalAlpha = 0.34;
+      ctx.strokeStyle = '#eaf9ff';
+      ctx.lineWidth = Math.max(0.7, b.r * 0.38);
+      ctx.beginPath();
+      ctx.ellipse(b.x, b.y, b.r, b.r * (1 + stretch), 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 0.4;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(b.x - b.r * 0.3, b.y - b.r * 0.32, Math.max(0.4, b.r * 0.26), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
   _updateStirBits(dt) {
     if (!this.stirBits.length) return;
     for (let i = this.stirBits.length - 1; i >= 0; i--) {
       const p = this.stirBits[i];
       p.life -= dt;
       if (p.life <= 0) { this.stirBits.splice(i, 1); continue; }
-      // 气泡持续上浮并左右飘；泥沙先被推起、再受重力沉回去
+      // 气泡持续上浮并左右飘；泥沙先被推起、再受重力沉回去；
+      // 流痕（8-⑨）没有浮力也没有重力 —— 只是被留下来的水，慢慢减速、轻轻上飘
       if (p.kind === 'bubble') {
         p.vy -= 26 * dt;
         p.vx += Math.sin(p.seed + p.life * 6) * 8 * dt;
+      } else if (p.kind === 'flow') {
+        p.vx *= 0.92; p.vy *= 0.92;
+        p.vy -= 5 * dt;
       } else {
         p.vy += 46 * dt;
       }
-      p.vx *= 0.97; p.vy *= 0.985;
+      if (p.kind !== 'flow') { p.vx *= 0.97; p.vy *= 0.985; }
       p.x += p.vx * dt; p.y += p.vy * dt;
       // 别钻出水线，也别穿过池底
       const srf = this.surfaceAt(p.x) + 1;
@@ -1058,7 +1276,26 @@ export class World {
     for (const p of this.stirBits) {
       const a = (p.life / p.maxLife) ** 2;
       if (a <= 0.02) continue;
-      if (p.kind === 'bubble') {
+      if (p.kind === 'flow') {
+        // 流痕（8-⑨）：一条向后飘的短水痕 —— 外层软晕 + 内芯亮线，越长越淡
+        const dx = Math.cos(p.ang), dy = Math.sin(p.ang);
+        const L = p.len * (0.55 + a * 0.45);
+        const wob = Math.sin(p.seed + p.life * 9) * 1.2;
+        ctx.globalAlpha = a * 0.16;
+        ctx.strokeStyle = '#d8f2fb';
+        ctx.lineWidth = p.wid * 2.2;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y + wob);
+        ctx.lineTo(p.x - dx * L, p.y + wob - dy * L);
+        ctx.stroke();
+        ctx.globalAlpha = a * 0.30;
+        ctx.strokeStyle = '#f2fcff';
+        ctx.lineWidth = p.wid;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - dx * L * 0.8, p.y - dy * L * 0.8);
+        ctx.stroke();
+      } else if (p.kind === 'bubble') {
         ctx.globalAlpha = a * 0.72;
         ctx.strokeStyle = '#eaf9ff';
         ctx.lineWidth = Math.max(0.7, p.r * 0.4);
@@ -1141,6 +1378,7 @@ export class World {
     this._updateFootprints(dt);
     this._updateWakes(dt);       // 拖尾痕迹（阶段 8-④）
     this._updateStirBits(dt);    // 水下搅动粒子（阶段 8-④）
+    this._updateAmbientBubbles(dt); // 环境上升气泡（阶段 8-⑨）
     for (const b of this.bubbles) b.phase += b.speed * dt;
     for (const s of this.silt) s.phase += s.speed * dt;
   }
@@ -1192,6 +1430,7 @@ export class World {
     this._drawWaveSurface(ctx, time);  // 一维水面波场的起伏明暗（阶段 8-④）
     this._drawBed(ctx, time);          // 池底淤泥 / 沉积 / 气泡
     this._drawStirBits(ctx);           // 水下搅动粒子（阶段 8-④）
+    this._drawAmbientBubbles(ctx);     // 环境上升气泡（阶段 8-⑨）
     this._drawBank(ctx, time);         // 岸顶草皮 / 沙 / 石
     this._drawFootprints(ctx);
     this._drawSurfaceSheet(ctx, time); // 水面"薄层"
@@ -1220,8 +1459,9 @@ export class World {
       tileTexture(ctx, this.tex.mud, 0, this.bankTopY, this.w, this.h - this.bankTopY, 0, 0,
         (CONFIG.natural?.terrainTexAlpha ?? 0.55) * 0.7);
     }
-    // 层理：几道横向的深浅带（沉积层的感觉）
-    ctx.globalAlpha = 0.16;
+    // 层理：几道横向的深浅带（沉积层的感觉）—— 水上水下都能透出来，
+    // 所以压低透明度，靠"隐约"而不是"色块"来表现
+    ctx.globalAlpha = 0.11;
     for (let i = 0; i < 5; i++) {
       const y = this.bankTopY + (this.h - this.bankTopY) * ((i + 0.5) / 5)
         + Math.sin(i * 3.1) * 14;
@@ -1513,22 +1753,41 @@ export class World {
     const C = CONFIG.colors;
 
     ctx.save();
-    // 池底基础色（贴地表曲线，每段水域一块）
+    // 池底罩染（贴地表曲线，每段水域一块）
+    // 阶段 8-⑩：原先用**不透明 marsh 色**一铺到底，与水线上方同一片土体的
+    // soil 渐变 + 泥纹在岸线处撞出一道垂直硬接缝（同一剖面两种画法）。
+    // 改成随深度渐浓的半透明罩染：土体本身的渐变 / 泥纹 / 层理 / 石块全程
+    // 连续，水下只是颜色随深度被"水色 + 湿泥"慢慢压暗；岸线附近再沿 x
+    // 方向羽化淡入（smoothstep），左右两侧自然衔接。
+    ctx.save();
+    ctx.beginPath();
     for (const s of this.waterSpans) {
-      ctx.beginPath();
       ctx.moveTo(s.x0, this.groundYAt(s.x0));
       for (let x = s.x0; x <= s.x1; x += 8) ctx.lineTo(x, this.groundYAt(x));
       ctx.lineTo(s.x1, this.h);
       ctx.lineTo(s.x0, this.h);
       ctx.closePath();
-      const g = ctx.createLinearGradient(0, this.bedY - 20, 0, this.h);
-      g.addColorStop(0, C.marsh);
-      g.addColorStop(1, C.marshMud);
-      ctx.fillStyle = g;
-      ctx.fill();
     }
+    ctx.clip();
+    const fadeW = Math.max(90, this.w * 0.055);
+    for (const s of this.waterSpans) {
+      // 左缘羽化区：逐窄条缩放透明度，避免"水下水色从岸线上凭空开始"
+      const fadeEnd = Math.min(s.x0 + fadeW, s.x1);
+      for (let x = s.x0; x < fadeEnd; x += 9) {
+        const t = (x - s.x0) / fadeW;
+        ctx.fillStyle = this._bedTint(ctx, smoothstep(clamp(t, 0, 1)));
+        ctx.fillRect(x, this.waterY - 6, 9, this.h - this.waterY + 6);
+      }
+      if (fadeEnd < s.x1) {
+        ctx.fillStyle = this._bedTint(ctx, 1);
+        ctx.fillRect(fadeEnd, this.waterY - 6, s.x1 - fadeEnd, this.h - this.waterY + 6);
+      }
+    }
+    ctx.restore();
 
-    // 泥浆纹理
+    // 泥浆纹理：earth 已对**全断面**铺过同相位 mud 纹理，这里不再重复铺
+    //（原先从 bedY-20 起铺、相位还和 earth 对不上，在泥面上压出一条横接缝）；
+    // 只补一层 silt 淤积纹理，且从 bedY-70 起纵向渐显，避免纹理硬起始。
     if (nat && N.terrainTex !== false && this.tex) {
       ctx.save();
       ctx.beginPath();
@@ -1540,22 +1799,21 @@ export class World {
         ctx.closePath();
       }
       ctx.clip();
-      tileTexture(ctx, this.tex.mud, 0, this.bedY - 20, this.w, this.h - this.bedY + 20, 0, 0,
-        N.terrainTexAlpha ?? 0.55);
-      tileTexture(ctx, this.tex.silt, 0, this.bedY - 20, this.w, this.h - this.bedY + 20,
-        137, 89, (N.terrainTexAlpha ?? 0.55) * 0.6);
+      tileTextureFaded(ctx, this.tex.silt, 0, this.bedY - 70, this.w, this.h - this.bedY + 70,
+        137, 89, (N.terrainTexAlpha ?? 0.55) * 0.45, this.bedY - 70, this.bedY + 45);
       ctx.restore();
     }
 
-    // 泥面与水体的过渡阴影
+    // 泥面（bedY 淤积线）与水体的过渡：拉长成软渐变（原先 32px 硬带
+    // 在泥面上压出一条横向色阶）
     ctx.save();
-    ctx.globalAlpha = 0.30;
     for (const s of this.waterSpans) {
-      const tg = ctx.createLinearGradient(0, this.bedY - 26, 0, this.bedY + 6);
-      tg.addColorStop(0, 'rgba(10,32,40,0.0)');
-      tg.addColorStop(1, 'rgba(10,26,30,0.7)');
+      const tg = ctx.createLinearGradient(0, this.bedY - 80, 0, this.bedY + 40);
+      tg.addColorStop(0, 'rgba(10,32,40,0)');
+      tg.addColorStop(0.5, 'rgba(12,30,34,0.24)');
+      tg.addColorStop(1, 'rgba(10,26,30,0.48)');
       ctx.fillStyle = tg;
-      ctx.fillRect(s.x0, this.bedY - 26, s.x1 - s.x0, 32);
+      ctx.fillRect(s.x0, this.bedY - 80, s.x1 - s.x0, 120);
     }
     ctx.restore();
 
@@ -1627,6 +1885,21 @@ export class World {
       ctx.fill();
     }
     ctx.restore();
+  }
+
+  /**
+   * 水下土体的纵深罩染渐变（岸线 → 池底越来越浓）。
+   * 色相全部取自土色系（soilWet / marsh / marshMud），保证与水上部分同源；
+   * fade 为岸线羽化系数 0~1，整体缩放各档透明度。
+   */
+  _bedTint(ctx, fade) {
+    const g = ctx.createLinearGradient(0, this.waterY, 0, this.h);
+    const a = (v) => (v * fade).toFixed(3);
+    g.addColorStop(0.00, `rgba(70,58,41,${a(0.06)})`);   // ≈ soilWet，刚入水几乎不压色
+    g.addColorStop(0.30, `rgba(58,48,34,${a(0.36)})`);
+    g.addColorStop(0.68, `rgba(58,53,36,${a(0.78)})`);   // ≈ marsh
+    g.addColorStop(1.00, `rgba(42,36,25,${a(0.93)})`);   // ≈ marshMud
+    return g;
   }
 
   /** 岸顶：草皮层 + 草叶 + 石头 */

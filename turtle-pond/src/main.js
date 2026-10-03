@@ -222,11 +222,12 @@ export class PondApp {
     this.canvas.width = window.innerWidth;
     this.canvas.height = window.innerHeight;
 
+    // 阶段 8-⑨：mousemove 只记坐标，尾迹改在 _update 里按渲染帧驱动 ——
+    // 事件驱动会在快速拖动时一坨一坨地冒（观感掉帧），慢速拖动又完全不出粒
     window.addEventListener('mousemove', (e) => {
       this.cursor.x = e.clientX;
       this.cursor.y = e.clientY;
       this.cursor.active = true;
-      this._cursorWake(e.clientX, e.clientY);
     });
     window.addEventListener('mouseleave', () => { this.cursor.active = false; });
 
@@ -361,32 +362,89 @@ export class PondApp {
   }
 
   /**
-   * 光标水面尾迹（阶段 5-⑪）—— 真实波动方程
-   * 沿光标移动的线段调用 world.addWake → 波场里连续落下扰动，
-   * 水波会真实传播、相互干涉并随距离衰减。
-   * 位移不足 minDist 时先攒着，避免高频采样把波场"打糊"。
+   * 光标水面尾迹（阶段 5-⑪；8-⑨ 改渲染帧驱动）—— 真实波动方程
+   *
+   * 旧版挂在 mousemove 事件上：事件一阵一阵地来，快拖时特效一坨坨冒
+   * （观感"帧数很低"），慢拖时位移不足 minDist 又整帧不出粒。
+   * 现在 mousemove 只记坐标，这里每帧拿"上次已施加的位置 → 当前光标"的线段：
+   *   · 位移攒够 minDist 才施加（慢拖会跨帧积累，不会永远不出）；
+   *   · 速度按"施加间隔"算（不是单帧 dt），攒了几帧也不会把速度高估；
+   *   · 水线附近 → world.addWake（波场扰动 + 拖尾痕）；深处 → 分段搅动。
    */
-  _cursorWake(x, y) {
+  _updateCursorFx(dt) {
     const nat = CONFIG.natural || {};
     if (nat.enabled === false || nat.cursorWake === false) return;
 
+    const c = this.cursor;
     const tr = this._cursorTrail;
-    const now = performance.now();
-    const dx = x - tr.lx, dy = y - tr.ly;
+    if (!c.active) return;
+    if (!tr.init) { tr.lx = c.x; tr.ly = c.y; tr.lt = performance.now(); tr.init = true; return; }
+
+    const dx = c.x - tr.lx, dy = c.y - tr.ly;
     const dist = Math.hypot(dx, dy);
-    const dt = Math.max(1, now - tr.lt) / 1000;
-    const speed = dist / dt;                 // px/s
+    const minDist = nat.cursorWakeMinDist ?? 4;
+    if (dist < minDist) return;
 
-    if (!tr.lt) { tr.lx = x; tr.ly = y; tr.lt = now; return; }
-
-    const minDist = nat.cursorWakeMinDist ?? 6;
-    if (dist < minDist) { tr.lt = now; return; }
-
-    // 用线段补插值：光标移动再快，尾迹也不会断成一粒粒孤立的波
-    if (this.world.isWater(x, y)) {
-      this.world.addWake(tr.lx, tr.ly, x, y, speed);
+    const now = performance.now();
+    const speed = dist / Math.max(1, now - tr.lt) * 1000;   // px/s
+    // 光标当前不在水里：只把锚点跟过去（拖过岸再回水里，从入水点重新起痕）
+    if (!this.world.isWater(c.x, c.y)) {
+      tr.lx = c.x; tr.ly = c.y; tr.lt = now;
+      return;
     }
-    tr.lx = x; tr.ly = y; tr.lt = now;
+    this.world.addWake(tr.lx, tr.ly, c.x, c.y, speed);
+    tr.lx = c.x; tr.ly = c.y; tr.lt = now;
+  }
+
+  /**
+   * 生物游动尾流（阶段 8-⑨）—— 鱼 / 龟身后看得见的水流 + 偶发气泡。
+   * 与 0.6s 一次的"水面起波"（下方原 5-⑪ 块）互补：
+   *   · 水面起波管的是"水线上的涟漪"（波场只有 1D 水面这个自由度）；
+   *   · 这里管的是"生物身体后头那条水痕"—— 按每只生物自己的速度
+   *     逐帧撒 kind:'flow' 流痕与卷气小泡，速度越快越密。
+   * 另加换气：龟在水下每隔 8~20s 吐一小串泡（快憋够了就往上浮的预兆），
+   * 鱼 rare 地冒一粒。
+   */
+  _updateSwimTrails(dt) {
+    const nat = CONFIG.natural ?? {};
+    if (nat.enabled === false || nat.swimTrail === false) return;
+    const W = this.world;
+
+    for (const f of this.fishes) {
+      if (f.dying || !W.isWater(f.x, f.y)) continue;
+      const sp = Math.hypot(f.vx ?? 0, f.vy ?? 0);
+      if (sp < 10) continue;
+      // 每只鱼一个独立累积器：速率 = 速度映射（3~16 粒/秒），速度快尾巴长
+      f._trailAcc = (f._trailAcc ?? 0) + dt * clamp(sp * 0.45, 3, 16);
+      while (f._trailAcc >= 1) {
+        f._trailAcc -= 1;
+        W.addSwimTrail(f.x, f.y, f.vx, f.vy, f.size, 'fish');
+      }
+      // 鱼冒泡：很稀（15~40s 一粒），纯点缀
+      f._breathT = (f._breathT ?? 10 + Math.random() * 25) - dt;
+      if (f._breathT <= 0) {
+        f._breathT = 15 + Math.random() * 25;
+        W.addBreathBubbles(f.x, f.y, f.size, f.vx >= 0 ? 1 : -1);
+      }
+    }
+
+    for (const t of this.turtles) {
+      if (t.dying || !W.isWater(t.x, t.y)) continue;
+      const sp = Math.hypot(t.vx ?? 0, t.vy ?? 0);
+      if (sp >= 4) {
+        t._trailAcc = (t._trailAcc ?? 0) + dt * clamp(sp * 0.7, 4, 20);
+        while (t._trailAcc >= 1) {
+          t._trailAcc -= 1;
+          W.addSwimTrail(t.x, t.y, t.vx, t.vy, t.size, 'turtle');
+        }
+      }
+      // 龟换气：水下憋 8~20s 吐一串泡（趴岸晒背时 isWater 拦掉，自然不吐）
+      t._breathT = (t._breathT ?? 4 + Math.random() * 10) - dt;
+      if (t._breathT <= 0) {
+        t._breathT = 8 + Math.random() * 12;
+        W.addBreathBubbles(t.x, t.y, t.size, t.vx >= 0 ? 1 : -1);
+      }
+    }
   }
 
   // ── 对外接口（LivelyProperties / 控制台可调）──────────
@@ -422,7 +480,14 @@ export class PondApp {
    * @param {object} [opts] { baby } 幼龟模式
    */
   addTurtle(speciesId = null, opts = {}) {
-    if (this.turtles.length >= CONFIG.growth.turtleCap) return null;
+    // 阶段 8-⑧：到上限时**必须给反馈**。旧版静默 return null，
+    // 用户按 T 只会觉得"加不进去了"，完全不知道是撞了上限（实测踩到）。
+    const cap = CONFIG.growth.turtleCap;
+    if (this.turtles.length >= cap) {
+      this._toast(`🐢 龟已满 ${this.turtles.length}/${cap}\npond.setTurtleCap(n) 可提高上限`, 3);
+      console.warn(`[pond] 龟数量已达上限 ${cap}，本次未添加。可用 pond.setTurtleCap(n) 提高上限。`);
+      return null;
+    }
     const sp = speciesId ? TURTLE_SPECIES[speciesId] : null;
     if (speciesId && !sp) console.warn('[pond] 未知龟品种:', speciesId);
     const t = new Turtle(this.world, this.turtles.length, sp, opts);
@@ -430,6 +495,13 @@ export class PondApp {
     this.turtles.push(t);
     this.save.touch();
     return t;
+  }
+
+  /** 提高/降低龟数量上限（运行时生效，不写存档） */
+  setTurtleCap(n) {
+    const v = Math.max(0, Math.floor(Number(n) || 0));
+    CONFIG.growth.turtleCap = v;
+    return { turtleCap: v, now: this.turtles.length };
   }
 
   removeTurtle(n = 1, speciesId = null) {
@@ -846,8 +918,11 @@ export class PondApp {
     // 植物（浮叶被推开 + 摇摆）
     this.plants.update(dt, time, movers);
 
-    // 世界（涟漪 + 真实波场推进）
+    // 世界（涟漪 + 真实波场推进 + 环境气泡）
     this.world.update(dt);
+
+    // 拖拽水特效（阶段 8-⑨）：渲染帧驱动，事件只记坐标 —— 观感不再"一坨一坨"
+    this._updateCursorFx(dt);
 
     // ── 生物游动尾迹（阶段 5-⑪ / ⑪c）：鱼/龟在水中游过留下真实扩散的波 ──
     // 强度按体型**幂次**缩放（排水量量级），不是近似均匀——小鱼只是细痕，
@@ -907,6 +982,9 @@ export class PondApp {
         }
       }
     }
+
+    // 身后水流 + 换气气泡（阶段 8-⑨）：管"生物背后那条水痕"，上面那块管水线涟漪
+    this._updateSwimTrails(dt);
 
     // 音效推进（阶段 5-⑨）：雨声随天气起伏 + 夜晚稀疏蛙鸣
     this.audio.update(dt, {
@@ -1214,7 +1292,7 @@ export class PondApp {
     const wx = CONFIG.weather?.enabled ? `  |  ${this.weather.summary}` : '';
     const arch = this.archive.count() > 0 ? `  |  📖 ${this.archive.count()}` : '';
     ctx.fillText(
-      `FPS ${this._curFps.toFixed(0)}  |  鱼 ${this.fishes.length}  龟 ${this.turtles.length}  食物 ${this.food.aliveCount}${extra ? '  |  ' + extra : ''}${dn}${lampTag}${wx}${arch}${this.paused ? '  |  ⏸ 已暂停' : ''}`,
+      `FPS ${this._curFps.toFixed(0)}  |  鱼 ${this.fishes.length}  龟 ${this.turtles.length}/${CONFIG.growth.turtleCap}  食物 ${this.food.aliveCount}${extra ? '  |  ' + extra : ''}${dn}${lampTag}${wx}${arch}${this.paused ? '  |  ⏸ 已暂停' : ''}`,
       12, this.world.h - 12
     );
     ctx.restore();
@@ -1423,6 +1501,8 @@ window.addEventListener('DOMContentLoaded', () => {
     /** 寿命/成长：pond.life() 看设置；pond.setLongevity(2) 寿命×2（立即生效） */
     life: () => window.pondApp.lifeInfo(),
     setLongevity: (v) => window.pondApp.setLongevity(v),
+    /** 龟数量上限：pond.setTurtleCap(30) 提高上限（默认 20）；龟满时按 T 会有提示 */
+    setTurtleCap: (n) => window.pondApp.setTurtleCap(n),
     /** 地形/构图：pond.terrain() → 水线/池底/岸/晒台的位置、水域分段与岸坡角度 */
     terrain: () => {
       const W = window.pondApp.world;
