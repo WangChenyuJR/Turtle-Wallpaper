@@ -113,40 +113,25 @@ export class World {
     // 落差还要服从"缓坡"约束：落差 ≤ 可用水平跨度(sr×bankSpan) ÷ minRun。
     // 竖屏（如 1000×1400）宽度不够摊开一条缓坡时，这里会自动压低岸顶、
     // 让出一点天空 —— 宁可天空多留一点，也不做一道竖直的坎给龟爬。
-    // 阶段 8-⑫：**左岸整体沉入水下**（用户："左侧的墙壁需要被水覆盖，让龟和鱼
-    // 也能过去，只是侧面能看到墙壁"）—— 水面铺满全宽，墙顶没入水线之下，
-    // 龟鱼直接从"墙"上方游过去；侧视图里仍看得见这道水下缓台/墙的轮廓。
-    // 想恢复露出水面的岸：CONFIG.layout.bank.submerged = false。
+    // 阶段 8-⑬（用户："保留原来岸边的高度，只不过水下部分的泥土只是剖面，
+    // 实际也能让乌龟和鱼在里面游动"）：岸恢复**原来露出水面的高度**（8-⑫ 曾整体
+    // 沉入水下），但水线以下的土体只是**剖面背景** —— 可游泳区的物理地板下沉到
+    // 池底（见 swimFloorY），龟鱼从"土"里游过去，岸上部分照常上岸晒背。
     const shelfSpan = clamp(BK.shelfRatio ?? 0.58, 0.2, 0.95) * sr;
-    if (BK.submerged !== false) {
-      const sink = Math.max(12, this.h * (BK.sinkRatio ?? 0.055));  // 墙顶没入水下的深度
-      this.bankSubmerged = true;
-      this.bankTopY = Math.round(wY + sink);
-      const tY = this.bankTopY;
-      const depth = Math.max(40, bY - tY);
-      this._bankPts = [
-        { t: 0, y: tY },                                                  // 墙顶（水下缓台外缘）
-        { t: shelfSpan, y: tY + depth * (BK.subShelfDrop ?? 0.035) },     // 水下缓台
-        { t: sr, y: tY + depth * (BK.subWallDrop ?? 0.58) },              // 墙面（剖面里最陡的一段）
-        { t: sr + (1 - sr) * (BK.shoalSpan ?? 0.34), y: tY + depth * 0.82 }, // 墙脚散水
-        { t: 1, y: bY },                                                  // 池底
-      ];
-    } else {
-      const maxDrop = (sr * this.bankSpan) / minRun;
-      const drop = Math.min(Math.max(24, wY - this.bankTopY), Math.max(24, maxDrop));
-      this.bankTopY = Math.round(wY - drop);
+    const maxDrop = (sr * this.bankSpan) / minRun;
+    const drop = Math.min(Math.max(24, wY - this.bankTopY), Math.max(24, maxDrop));
+    this.bankTopY = Math.round(wY - drop);
 
-      const tY = this.bankTopY;
-      this._bankPts = [
-        { t: 0, y: tY },
-        { t: shelfSpan, y: tY + (wY - tY) * (BK.shelfDrop ?? 0.15) }, // 岸顶缓台
-        { t: sr, y: wY },                                             // 岸线（正好落在水线）
-        // ── 水下：先一大段浅滩（缓），再折向池壁 ──
-        { t: sr + (1 - sr) * (BK.shoalSpan ?? 0.34), y: wY + (bY - wY) * (BK.shoalDrop ?? 0.13) },
-        { t: sr + (1 - sr) * (BK.wallSpan ?? 0.66), y: wY + (bY - wY) * (BK.wallDrop ?? 0.55) },
-        { t: 1, y: bY },                                              // 池底
-      ];
-    }
+    const tY = this.bankTopY;
+    this._bankPts = [
+      { t: 0, y: tY },
+      { t: shelfSpan, y: tY + (wY - tY) * (BK.shelfDrop ?? 0.15) }, // 岸顶缓台
+      { t: sr, y: wY },                                             // 岸线（正好落在水线）
+      // ── 水下：先一大段浅滩（缓），再折向池壁。这段只是剖面画，物理地板见 swimFloorY ──
+      { t: sr + (1 - sr) * (BK.shoalSpan ?? 0.34), y: wY + (bY - wY) * (BK.shoalDrop ?? 0.13) },
+      { t: sr + (1 - sr) * (BK.wallSpan ?? 0.66), y: wY + (bY - wY) * (BK.wallDrop ?? 0.55) },
+      { t: 1, y: bY },                                              // 池底
+    ];
 
     // ── 晒台 ──────────────────────────────────────────
     const P = L.platform ?? {};
@@ -309,44 +294,41 @@ export class World {
   /**
    * 判断点是否在水面可游区域。
    *
-   * ⚠️ 上下两个边界的存在理由不一样，别随手改：
-   *   · 上边界 `y > s + 3`：为了让**浮在水面的饲料**（落在水线下 ~4px）也算在水里，
-   *     否则鱼龟永远吃不到它。代价是"水线以上 3px"成了既不算水也不算陆的空档，
-   *     由 `isLand` 的过渡带负责兜住（见下）。
-   *   · 下边界本来是 `y < g - 4`（池底上方留 4px），阶段 8-⑧ 收到 `y < g`：
-   *     那 4px 同样是空档 —— 龟贴着池底游时会被判成"既不在水也不在岸"
-   *     （实测残留 48~128 帧全在 climb_out 的贴底时刻）。水本来就该铺满到池底。
+   * ⚠ 阶段 8-⑬ 剖面水体：可游泳区 = **水线以下、剖面地板（swimFloorY）以上，
+   * 全宽** —— 岸坡列画着土的地方其实也是水（土只是剖面背景），龟鱼能一路
+   * 游到池底。所以这里不再用"该列地表是否在水线下"做闸门。
+   *
+   * 上边界 `y > s`：浮在水面的饲料（落在水线下 ~4px）也算在水里。
+   * （旧版是 `y > s+3`，那 3px 由 isLand 的过渡带兜底；8-⑬ 起开阔水面的
+   * 过渡带退役，边界直接收到水线，避免留出"既不算水也不算陆"的空档。）
    */
   isWater(x, y) {
     if (x < 0 || x > this.w || y < 0 || y > this.h) return false;
     const s = this.surfaceAt(x);
-    const g = this.groundYAt(x);
-    if (g <= s + 2) return false;         // 该列地表在水线之上 → 没有水
-    return y > s + 3 && y <= g;
+    return y > s && y <= this.swimFloorY(x);
   }
 
   /**
    * 判断点是否"站在干地上"（岸 / 晒台）。
    * 容差 TOL 是为了让龟的"身体中心"（比脚高一点）也算踩在地上。
    *
-   * ⚠️ 阶段 8-⑧ 补上水陆之间的过渡带：
-   * 水列的判据是"y 比水线深 3px 以上才算水"（`isWater` 留这 3px 是为了让浮在
-   * 水面的饲料也算在水里）。于是水线上下那几像素**既不算水也不算陆** ——
-   * 而龟在上岸 / 回水途中（climb_out / return）身体中心必然扫过这段，
-   * 就会被判成"既不在水也不在岸"（实测：跑 2 分钟有 1616 帧卡在这个空档里）。
-   * 现在把"贴着水线以上一个身位内"归到陆地，与 `isWater` 无缝衔接。
+   * ⚠ 阶段 8-⑬ 修"龟把水面当地面"：
+   * 过渡带（水线上方一个身位算陆地）**只保留在近岸浅水列**（池底离水线不到
+   * 34px，即上岸/回水途中身体中心会扫过的地方）；开阔水面的水列一律不算陆 ——
+   * 8-⑫ 之后全宽都是水列，旧的无差别过渡带把整条水线都判成了"地面"，
+   * 龟就在水面上走路、留脚印、不肯下潜（用户实测截图反馈）。
    */
   isLand(x, y) {
     const g = this.groundYAt(x);
     const s = this.surfaceAt(x);
-    // 分支判据与 isLandColumn 完全一致（isWaterColumn）—— 否则列判定与点判定
-    // 会在水线附近差出几像素，又是一条新的空档。
-    if (this.isWaterColumn(x)) {
-      // 水列：只认"贴着水线上方"的这一条过渡带；再往上是空气，不算地面
-      return y >= s - 30 && y <= s + 4;
+    // 干地列（岸坡/晒台，地表露出水面）：贴着地表算
+    if (g <= s + 2) {
+      const TOL = 28;
+      return y >= g - TOL && y <= g + 26;
     }
-    const TOL = 28;
-    return y >= g - TOL && y <= g + 26;
+    // 水列：只有近岸浅水保留过渡带（身体中心过水线的必经之路）
+    if (g - s >= 34) return false;
+    return y >= s - 30 && y <= s + 4;
   }
 
   /** 旧名兼容：岸边 = 干地 */
@@ -355,43 +337,58 @@ export class World {
   /** 是否在池底的淤泥里（地表之下） */
   isMarsh(x, y) { return y >= this.groundYAt(x) - 4; }
 
-  /** 把点约束到水面区域内（返回的点保证仍落在 isWater 范围内） */
+  /**
+   * 可游泳区的**物理地板**（阶段 8-⑬ 剖面水体）
+   *
+   * 用户："水下部分的泥土只是剖面，实际也能让乌龟和鱼在里面游动。"
+   * 画出来的地表曲线（岸坡/浅滩/池壁）在水线以下只是**剖面背景**，
+   * 龟鱼真正的活动下界一路沉到池底。岸坡列取池底、开阔列取地表
+   * （两条曲线本来在池底重合），max() 同时兼容晒台（台面下照旧是水）。
+   */
+  swimFloorY(x) {
+    const bump = CONFIG.layout?.hump ?? 4;
+    return Math.max(this.groundYAt(x), this.bedY + this._noiseAt(x) * bump);
+  }
+
+  /**
+   * 该列水线以下是否有可游泳的水（8-⑬）。
+   * 剖面水体铺满全宽 —— 连岸坡列的水下部分也算（龟鱼从土前游过）；
+   * 唯一挡水的是露出水面的晒台台面。与 isWaterColumn（视觉水列，
+   * 决定水线/波纹画到哪里）是两个概念，别混用。
+   */
+  isSwimColumn(x) {
+    const p = this.platform;
+    if (p.on && p.topY < this.waterY - 8 && Math.abs(x - p.cx) < p.halfW * 0.58) return false;
+    return true;
+  }
+
+  /** 可游泳区路径：水线以下、剖面地板以上，全宽（粒子裁剪 / 剖面水色用） */
+  _swimPath(ctx) {
+    ctx.beginPath();
+    ctx.moveTo(0, this.surfaceAt(0));
+    for (let x = 0; x <= this.w; x += 6) ctx.lineTo(x, this.surfaceAt(x));
+    ctx.lineTo(this.w, this.swimFloorY(this.w));
+    for (let x = this.w; x >= 0; x -= 6) ctx.lineTo(x, this.swimFloorY(x));
+    ctx.closePath();
+  }
+
+  /** 把点约束到可游泳区域内（返回的点保证仍落在 isWater 范围内） */
   constrainToWater(x, y, margin = 8) {
+    // 8-⑬ 剖面水体：可游泳区 = 水线以下、池底以上，**全宽**
+    //（岸坡列画着土的地方也是水，见 swimFloorY）；唯晒台台面挡水。
     const m = Math.max(8, margin);
     let cx = clamp(x, m, this.w - m);
-    // ① 找最近的水域横向区段
-    let span = this.waterSpans[0];
-    let bd = Infinity;
-    for (const s of this.waterSpans) {
-      const lo = s.x0 + m, hi = s.x1 - m;
-      if (hi <= lo) continue;
-      const d = cx < lo ? lo - cx : cx > hi ? cx - hi : 0;
-      if (d < bd) { bd = d; span = s; }
+    const p = this.platform;
+    if (p.on && p.topY < this.waterY - 8) {
+      const half = p.halfW * 0.58;          // 台面平顶部分（与 groundYAt 的台缘一致）
+      if (Math.abs(cx - p.cx) < half + m) {
+        cx = cx < p.cx ? p.cx - half - m : p.cx + half + m;
+        cx = clamp(cx, m, this.w - m);
+      }
     }
-    cx = clamp(cx, span.x0 + m, Math.max(span.x0 + m, span.x1 - m));
-
-    // ② 靠岸的水太薄（放不下 margin）→ 往池心挪，直到这一列的水够厚
-    const need = m * 2 + 10;
-    const mid = (span.x0 + span.x1) / 2;
-    const dir = cx < mid ? 1 : -1;
-    let guard = 0;
-    while (guard++ < 80 && this.groundYAt(cx) - this.surfaceAt(cx) < need) {
-      const nx = cx + dir * 8;
-      if (nx <= span.x0 || nx >= span.x1) break;
-      cx = nx;
-    }
-    cx = clamp(cx, 1, this.w - 1);
-
     const top = this.surfaceAt(cx) + m;
-    const bot = this.groundYAt(cx) - Math.max(6, m * 0.6);
-    let cy = clamp(y, top, Math.max(top, bot));
-    // ③ 兜底：真出现"水太薄"的极端情况，也别吐出一个不在水里的点
-    if (!(this.groundYAt(cx) - this.surfaceAt(cx) > 12)) {
-      cx = clamp(mid, 1, this.w - 1);
-      const t2 = this.surfaceAt(cx) + 8;
-      const b2 = this.groundYAt(cx) - 6;
-      cy = clamp(cy, t2, Math.max(t2, b2));
-    }
+    const bot = this.swimFloorY(cx) - Math.max(6, m * 0.6);
+    const cy = clamp(y, top, Math.max(top, bot));
     return { x: cx, y: cy };
   }
 
@@ -424,9 +421,11 @@ export class World {
 
     // ② 地表曲线：**穿透 = 身体半径 − 到地表的垂直距离**（注意方向：
     //    生物在水里，y 比 g(x) 小，`(g - y)` 是"离地还有多远"，
-    //    远大于 margin 时说明它好端端地待在水里，不该算碰墙）
-    const g = this.groundYAt(x);
-    const slope = (this.groundYAt(x + 3) - this.groundYAt(x - 3)) / 6;
+    //    远大于 margin 时说明它好端端地待在水里，不该算碰墙）。
+    //    8-⑬ 起用**剖面地板**（swimFloorY）：水线以下的土体只是剖面，
+    //    生物下潜时撞的应该是池底，而不是画出来的岸坡/浅滩曲线。
+    const g = this.swimFloorY(x);
+    const slope = (this.swimFloorY(x + 3) - this.swimFloorY(x - 3)) / 6;
     const inv = 1 / Math.hypot(1, slope);
     const dG = margin - (g - y) * inv;
     if (dG > 0) take(dG, slope * inv, -inv, Math.abs(slope) > 0.6 ? 'wall' : 'ground');
@@ -1191,24 +1190,22 @@ export class World {
     if (!this.ambBubbles) this.ambBubbles = [];
 
     // 冒泡：每隔一阵在随机水列的池底冒 1~3 个
+    // 8-⑬：剖面水体铺满全宽 —— 岸坡土前也会冒泡（用剖面地板做池底）
     this._ambBubT = (this._ambBubT ?? 2) - dt;
     if (this._ambBubT <= 0) {
       const gapMin = nat.bubGapMin ?? 1.3, gapMax = nat.bubGapMax ?? 4.2;
       this._ambBubT = rand(gapMin, gapMax);
-      const spans = this.waterSpans;
-      if (spans.length) {
-        const s = spans[Math.floor(Math.random() * spans.length)];
-        const x = rand(s.x0 + 8, Math.max(s.x0 + 9, s.x1 - 8));
-        const y0 = this.groundYAt(x) - rand(2, 8);
-        const n = 1 + (Math.random() < 0.35 ? 1 : 0) + (Math.random() < 0.12 ? 1 : 0);
-        for (let i = 0; i < n; i++) {
-          this.ambBubbles.push({
-            x: x + rand(-5, 5), y: y0 - i * rand(4, 9),
-            r: rand(1.2, 3.2),
-            vy: -rand(5, 12),
-            sway: rand(0, 6.28), swayAmp: rand(3, 9), swaySp: rand(1.4, 3.0),
-          });
-        }
+      const bx = rand(8, this.w - 8);
+      const sx = this.isSwimColumn(bx) ? bx : this.w * 0.5;
+      const y0 = this.swimFloorY(sx) - rand(2, 8);
+      const n = 1 + (Math.random() < 0.35 ? 1 : 0) + (Math.random() < 0.12 ? 1 : 0);
+      for (let i = 0; i < n; i++) {
+        this.ambBubbles.push({
+          x: sx + rand(-5, 5), y: y0 - i * rand(4, 9),
+          r: rand(1.2, 3.2),
+          vy: -rand(5, 12),
+          sway: rand(0, 6.28), swayAmp: rand(3, 9), swaySp: rand(1.4, 3.0),
+        });
       }
     }
 
@@ -1224,7 +1221,8 @@ export class World {
       if (b.y <= srf) {
         // 破裂：极轻的水面顶升（强度 ∝ 半径）+ 一圈微涟漪
         if (this.wave) this.wave.disturb(b.x, 0, Math.min(0.06, 0.016 * b.r), 1);
-        if (this.isWaterColumn(b.x)) {
+        // 8-⑬：剖面水体里岸坡前也有水面，"啵"一下照样推微涟漪
+        if (this.isSwimColumn(b.x)) {
           this.ripples.push({
             x: b.x, y: srf, r: 1, maxR: 3 + b.r * 2.6,
             alpha: 0.13, speed: 26,
@@ -1240,7 +1238,7 @@ export class World {
   _drawAmbientBubbles(ctx) {
     if (!this.ambBubbles || !this.ambBubbles.length) return;
     ctx.save();
-    this._waterPath(ctx);
+    this._swimPath(ctx);   // 8-⑬：剖面水体里（含岸坡土前）的气泡也要画出来
     ctx.clip();
     for (const b of this.ambBubbles) {
       const stretch = Math.min(0.45, Math.max(0, -b.vy / 90));
@@ -1279,10 +1277,10 @@ export class World {
       }
       if (p.kind !== 'flow') { p.vx *= 0.97; p.vy *= 0.985; }
       p.x += p.vx * dt; p.y += p.vy * dt;
-      // 别钻出水线，也别穿过池底
+      // 别钻出水线，也别穿过剖面地板（8-⑬：水下土体只是剖面，地板在池底）
       const srf = this.surfaceAt(p.x) + 1;
       if (p.y < srf) p.y = srf;
-      const flr = this.groundYAt(p.x) - 1;
+      const flr = this.swimFloorY(p.x) - 1;
       if (p.y > flr) { p.y = flr; p.vy *= -0.25; }
     }
   }
@@ -1290,7 +1288,7 @@ export class World {
   _drawStirBits(ctx) {
     if (!this.stirBits.length) return;
     ctx.save();
-    this._waterPath(ctx);
+    this._swimPath(ctx);   // 8-⑬：剖面水体里（含岸坡土前）的粒子也要画出来
     ctx.clip();
     for (const p of this.stirBits) {
       const a = (p.life / p.maxLife) ** 2;
@@ -1446,6 +1444,7 @@ export class World {
     this._ensureTextures();
     this._drawEarth(ctx, time);        // 剖面土体（岸 + 池底，最底层）
     this._drawWater(ctx, time);        // 水体（水色分层 + 流动纹理 + 光柱）
+    this._drawCutWater(ctx, time);     // 剖面水体：土体水线以下的部分罩水色（阶段 8-⑬）
     this._drawWaveSurface(ctx, time);  // 一维水面波场的起伏明暗（阶段 8-④）
     this._drawBed(ctx, time);          // 池底淤泥 / 沉积 / 气泡
     this._drawStirBits(ctx);           // 水下搅动粒子（阶段 8-④）
@@ -1455,6 +1454,34 @@ export class World {
     this._drawSurfaceSheet(ctx, time); // 水面"薄层"
     this._drawWakeTrails(ctx);         // 拖尾痕迹（阶段 8-④）
     this._drawRipples(ctx);            // 入水溅射（水花 + 短横痕）
+  }
+
+  /**
+   * 剖面水体（阶段 8-⑬）：画出来的地表曲线以下、水线以下的区域实际是
+   * 可游泳的水（土体只是切面背景）—— 给这片"切面背后的水"罩一层水色，
+   * 让岸坡的土看起来泡在水里，龟鱼游过时才像在水中而不是在土上。
+   * 开阔水面的水色由 _drawWater 负责；这里只补"地表曲线以下"的部分，
+   * 两者在水线上下恰好拼成整片水体。
+   */
+  _drawCutWater(ctx) {
+    if (CONFIG.natural?.cutWaterTint === false) return;
+    const C = CONFIG.colors;
+    ctx.save();
+    this._swimPath(ctx);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.moveTo(0, this.groundYAt(0));
+    for (let x = 0; x <= this.w; x += 6) ctx.lineTo(x, this.groundYAt(x));
+    ctx.lineTo(this.w, this.h);
+    ctx.lineTo(0, this.h);
+    ctx.closePath();
+    ctx.globalAlpha = 0.42;
+    const g = ctx.createLinearGradient(0, this.waterY, 0, this.bedY);
+    g.addColorStop(0, C.waterShallow ?? '#7ec8dd');
+    g.addColorStop(1, C.waterDeep ?? '#2e7d95');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.restore();
   }
 
   /** 剖面土体：地表曲线以下全是"切开的土"，越深越暗 */

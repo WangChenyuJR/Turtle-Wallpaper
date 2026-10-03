@@ -281,7 +281,8 @@ export class Fish {
           const a = rand(0, Math.PI * 2);
           const r = rMax * rand(0.3, 1);
           const tx = clamp(this.x + Math.cos(a) * r, 6, W.w - 6);
-          const s = W.surfaceAt(tx), g = W.groundYAt(tx);
+          // 8-⑬ 剖面水体：下界用剖面地板（池底）—— 鱼能游进岸坡前的"土"里
+          const s = W.surfaceAt(tx), g = W.swimFloorY(tx);
           if (g - s < 30) continue;                       // 那一列水深不够，换一个
           const ty = rand(s + 14, Math.max(s + 15, g - 14));
           if (W.isWater(tx, ty)) { T.roamX = tx; T.roamY = ty; T.hasRoam = true; break; }
@@ -303,15 +304,15 @@ export class Fish {
     // ── 偏好水层：每条鱼有自己的"舒适深度" ──────────────────
     // 免得一池鱼全挤在同一水平线上（那看起来也像"黏成一团"）。
     if ((F.depthPull ?? 0) > 0) {
-      const s = W.surfaceAt(this.x), g = W.groundYAt(this.x);
+      const s = W.surfaceAt(this.x), g = W.swimFloorY(this.x);   // 8-⑬ 剖面地板
       const wantY = s + (g - s) * T.depthPref;
       ay += clamp((wantY - this.y) / 40, -1, 1) * F.maxForce * F.depthPull;
     }
 
     // ── 避墙 ───────────────────────────────────────────
     const m = 42;
-    const top = W.bankLineAt(this.x);
-    const bot = W.marshLineAt(this.x);
+    const top = W.surfaceAt(this.x);          // 8-⑬：游泳区上界就是水线
+    const bot = W.swimFloorY(this.x);         //      下界是剖面地板（池底）
     if (this.x < m) ax += F.maxForce * 1.2;
     if (this.x > W.w - m) ax -= F.maxForce * 1.2;
     if (this.y < top + m) ay += F.maxForce * 1.4;

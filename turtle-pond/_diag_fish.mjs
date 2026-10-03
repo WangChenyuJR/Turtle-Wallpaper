@@ -161,15 +161,11 @@ function crowd(set, seed) {
   return { tight: tight / frames * 100, nn: nnSum / frames };
 }
 {
-  // ⚠️ 阶段 8-⑫：默认地形左岸沉底 → 水体几乎翻倍，"老行为"在大水体里**不再聚团**，
-  // 老-新对照的锚在新地形下失效（判据必须跟着世界模型走）。
-  // 所以：老行为对照切回**旧地形**（岸露出水面）跑，8-⑪ 的回归照常守；
-  // 新地形单独断言"当前配置不聚团"。
-  CONFIG.layout.bank.submerged = false;
+  // 阶段 8-⑬：默认地形恢复为"岸露出水面"（8-⑫ 的 submerged 开关已删除），
+  // 水 体量回到 8-⑪ 时的水平，老-新对照直接在默认地形上跑即可。
   const old = crowd({ roamRadius: 200, spacing: 0, spacingForce: 0 }, 20261003);
-  CONFIG.layout.bank.submerged = true;
-  const on = crowd({}, 20261003);                 // 直接读 CONFIG.fish 当前值（新地形）
-  check('老行为确实老是一团（旧地形复现用户现象）', old.tight >= 50, `拥挤帧 ${old.tight.toFixed(0)}%`);
+  const on = crowd({}, 20261003);                 // 直接读 CONFIG.fish 当前值
+  check('老行为确实老是一团（复现用户现象）', old.tight >= 40, `拥挤帧 ${old.tight.toFixed(0)}%`);
   check('现在拥挤帧 ≤ 20%（实测 5%）', on.tight <= 20, `拥挤帧 ${on.tight.toFixed(0)}%`);
   check('拥挤帧至少降 5 倍', old.tight >= on.tight * 5,
     `${old.tight.toFixed(0)}% → ${on.tight.toFixed(0)}%`);

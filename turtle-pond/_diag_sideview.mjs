@@ -31,30 +31,25 @@ for (const [W, H] of SIZES) {
   const tag = `${W}×${H}`;
   const bad = [];
 
-  // 1) 关键高度顺序：水线 < 墙顶 < 池底（阶段 8-⑫：左岸沉入水下，墙顶在水线之下）
-  if (!(w.waterY < w.bankTopY && w.bankTopY < w.bedY)) bad.push('高度顺序');
+  // 1) 关键高度顺序：岸顶 < 水线 < 池底（阶段 8-⑬：岸恢复露出水面的高度）
+  if (!(w.bankTopY < w.waterY && w.waterY < w.bedY)) bad.push('高度顺序');
   // 2) 地表处处有限
   for (let x = 0; x <= W; x += 7) {
     const g = w.groundYAt(x);
     if (!Number.isFinite(g)) { bad.push(`groundY@${x}=${g}`); break; }
   }
-  // 3) 阶段 8-⑫：水面铺满全宽（左岸沉底后不再有陆列）
+  // 3) 视觉水列占比（水线从岸线铺到右缘；岸坡列的水下部分不算"视觉水"）
   let waterCols = 0, total = 0;
   for (let x = 0; x <= W; x += 4) { total++; if (w.isWaterColumn(x)) waterCols++; }
   const frac = waterCols / total;
-  if (frac < 0.98) bad.push(`水面占比 ${(frac * 100).toFixed(0)}%（应全宽）`);
+  if (frac < 0.3 || frac > 0.85) bad.push(`水面占比 ${(frac * 100).toFixed(0)}%`);
 
   ok(bad.length === 0, `${tag} 基本几何`, bad.join(' '));
 
-  // 4) 阶段 8-⑫：左侧是一堵**没入水下**的墙 —— 墙顶在水线下、又没沉太深
-  //    （龟鱼要从墙顶上游过去，顶上得留够水头）；想恢复露出水面的岸：
-  //    CONFIG.layout.bank.submerged = false。
+  // 4) 阶段 8-⑬：左侧是**露出水面的岸**（恢复 8-⑫ 之前的高度），右侧水面铺到右缘
   const leftTop = w.groundYAt(4);
-  const sink = leftTop - w.waterY;
-  ok(leftTop > w.surfaceAt(4),
-    `${tag} 左墙顶没入水下（墙顶 ${leftTop.toFixed(0)} > 水线 ${w.surfaceAt(4).toFixed(0)}）`);
-  ok(sink >= H * 0.03 && sink <= H * 0.09,
-    `${tag} 墙顶吃水 ${(sink / H * 100).toFixed(1)}%h（3%~9%，太浅游不过、太深看不见墙）`);
+  ok(leftTop < w.surfaceAt(4),
+    `${tag} 左侧是岸（左地表 ${leftTop.toFixed(0)} < 水线 ${w.surfaceAt(4).toFixed(0)}）`);
   const rbOn = CONFIG.layout?.rightBank?.enabled === true;
   const rx = W - 4;
   ok(rbOn ? w.groundYAt(rx) < w.surfaceAt(rx) : w.isWaterColumn(rx),
@@ -80,11 +75,17 @@ for (const [W, H] of SIZES) {
     ok(!w.isWater(px, w.groundYAt(px) + 40), `${tag} 晒台内部不是水`);
   }
 
-  // 7) 阶段 8-⑫：左墙顶一带是**水下地形** —— 墙顶上方是水（龟鱼从上面游过去），
-  //    墙体本身不再是干地
+  // 7) 阶段 8-⑬ 剖面水体：岸坡列画着土的地方实际是**水**（土只是剖面背景），
+  //    物理地板一路沉到池底；但干地/空气不越界
   const bankX = Math.round(w.bankSpan * 0.2);
-  ok(w.isWaterColumn(bankX) && w.isWater(bankX, w.groundYAt(bankX) - 8),
-    `${tag} 墙顶上方是水（x=${bankX}，墙顶 ${w.groundYAt(bankX).toFixed(0)} 在水线下）`);
+  const bs = w.surfaceAt(bankX), bf = w.swimFloorY(bankX);
+  ok(w.isWater(bankX, Math.max(bs + 6, (bs + bf) / 2)),
+    `${tag} 岸坡土前是水（x=${bankX}，水线 ${bs.toFixed(0)} → 地板 ${bf.toFixed(0)}）`);
+  ok(bf >= w.bedY - 4, `${tag} 剖面地板处处到池底（x=${bankX} 地板 ${bf.toFixed(0)} / 池底 ${w.bedY}）`);
+  // 开阔水面不再是"地面"（修 8-⑫ 以来的"龟在水上走路/留水面脚印"）
+  const midX2 = Math.round(W * 0.6);
+  ok(!w.isLand(midX2, w.surfaceAt(midX2) + 1) && !w.isLand(midX2, w.surfaceAt(midX2) + 3),
+    `${tag} 开阔水面不是地面（龟不再在水上走）`);
 
   // 8) constrainToWater 把任意点都收回水里
   let leaked = 0;
@@ -95,14 +96,13 @@ for (const [W, H] of SIZES) {
   }
   ok(leaked === 0, `${tag} constrainToWater 400 次随机点全部落在水里`, leaked ? `${leaked} 次漏出` : '');
 
-  // 9) pickLandSpot：无陆地时**必须返回 null**（龟的上岸决策据此自然休眠，
-  //    绝不能返回一个水下的假落点让龟去"上岸"）
+  // 9) pickLandSpot 给出可站的干地（阶段 8-⑬：左岸已恢复，龟有地方晒背）
   let badSpot = 0;
   for (let i = 0; i < 200; i++) {
     const s = w.pickLandSpot(Math.random() * W, Math.random() < 0.5);
-    if (s !== null) badSpot++;
+    if (!s || !w.isLand(s.x, s.y)) badSpot++;
   }
-  ok(badSpot === 0, `${tag} 无陆地时 pickLandSpot 全部返回 null`, badSpot ? `${badSpot} 次给了点` : '');
+  ok(badSpot === 0, `${tag} pickLandSpot 200 次都给到干地`, badSpot ? `${badSpot} 次不行` : '');
 
   // 10) shorePointNear / waterEntryNear 挨着水
   let badShore = 0, badEntry = 0;
@@ -124,75 +124,66 @@ for (const [W, H] of SIZES) {
     ok(Math.abs(waterPct - wantWater) < 0.03,
       `${tag} 水线抬到 ${(waterPct * 100).toFixed(1)}%（目标 ${(wantWater * 100).toFixed(1)}%，把画面让给水）`);
 
-    // 天空留白（阶段 8-⑫：岸沉底后"天空"就是水线以上的部分，用 waterY 量）
-    ok(w.waterY / H <= 0.24,
-      `${tag} 天空留白 ${((w.waterY / H) * 100).toFixed(1)}%（≤24%，不多留空气）`);
+    // 天空留白（岸顶以上；8-⑬ 岸恢复原高，岸顶就是天空的下沿）
+    ok(w.bankTopY / H <= 0.23,
+      `${tag} 天空留白 ${((w.bankTopY / H) * 100).toFixed(1)}%（≤23%，不多留空气）`);
 
     // 底部泥层厚度（阶段 8-⑧ 用户："水底泥土的占比降低"）
     // ⚠️ bedY 是**池底在画面里的高度比例**：数值越大 = 池底越靠下 = 泥层越薄。
     const mudPct = (H - w.bedY) / H;
     ok(mudPct <= 0.15, `${tag} 池底泥层只占 ${(mudPct * 100).toFixed(1)}%（≤15%）`);
 
-    // ── 阶段 8-⑫：水下墙的三个量化指标 ──
-    // ① 墙要"读得出来"：墙顶明显高过年终池底（否则沉底等于把地形抹平）
-    const wallRise = w.bedY - w.groundYAt(1);
-    ok(wallRise >= (w.bedY - w.waterY) * 0.35,
-      `${tag} 水下墙高出池底 ${wallRise.toFixed(0)}px（≥总水深的 35%，剖面里看得见墙）`);
+    // ── 岸坡坡度（恢复 8-⑫ 之前的岸，缓坡指标照旧守住）──
+    // 岸坡整体角：画面左缘（岸顶）→ 岸线，整体要缓
+    const edge = w.waterLeftX;
+    const dropAll = Math.max(0, w.surfaceAt(edge) - w.groundYAt(1));
+    const angAll = (Math.atan2(dropAll, Math.max(1, edge)) * 180) / Math.PI;
+    ok(angAll <= 30, `${tag} 岸坡整体 ${angAll.toFixed(1)}°（≤30° 才算缓）`);
 
-    // ② 墙顶缓台要平缓：从左缘到缓台中段，坡角有绝对上限 + 必须**明显缓于墙面**
-    //    （相对对比才抗噪声/抗分辨率差异 —— 绝对阈值在竖屏上会间歇挂）
-    //    ⚠️ 滑动窗口 ±12px 量坡度，别用相邻 2px 差分（噪声会出 60° 假峰）
-    let shelfMax = 0;
-    const shelfEnd = Math.round(w.bankSpan * (CONFIG.layout?.bank?.shelfRatio ?? 0.58) * w.shoreRatio * 0.7);
-    for (let x = 14; x <= Math.max(14, shelfEnd); x += 2) {
+    // 水线附近最陡角 —— 龟攀爬的就是这一段（滑动窗口 ±12px 量坡，防噪声假峰）
+    let maxNear = 0;
+    for (let x = Math.max(14, edge - 44); x <= edge - 12; x += 2) {
       const dy = w.groundYAt(x + 12) - w.groundYAt(x - 12);
-      shelfMax = Math.max(shelfMax, (Math.abs(Math.atan2(dy, 24)) * 180) / Math.PI);
+      maxNear = Math.max(maxNear, (Math.abs(Math.atan2(dy, 24)) * 180) / Math.PI);
     }
-    ok(shelfMax <= 35, `${tag} 墙顶缓台最陡 ${shelfMax.toFixed(1)}°（≤35°）`);
+    ok(maxNear <= 45, `${tag} 水线附近最陡 ${maxNear.toFixed(0)}°（≤45° 龟爬得上）`);
 
-    // ③ 墙面要立得住：缓台之后那一段的最陡坡 ≥35°，且比缓台陡一截（侧视图里像墙）
-    let wallMax = 0;
-    const wallX0 = Math.round(w.bankSpan * (CONFIG.layout?.bank?.shelfRatio ?? 0.58) * w.shoreRatio);
-    const wallX1 = Math.round(w.bankSpan * (w.shoreRatio + 0.12));
-    for (let x = Math.max(14, wallX0); x <= Math.min(W - 14, wallX1); x += 2) {
-      const dy = w.groundYAt(x + 12) - w.groundYAt(x - 12);
-      wallMax = Math.max(wallMax, (Math.abs(Math.atan2(dy, 24)) * 180) / Math.PI);
-    }
-    ok(wallMax >= 35, `${tag} 墙面最陡 ${wallMax.toFixed(1)}°（≥35° 才像墙）`);
-    ok(wallMax >= shelfMax + 8, `${tag} 墙面比缓台陡（墙 ${wallMax.toFixed(0)}° vs 台 ${shelfMax.toFixed(0)}°）`);
+    // 水下：刚入水 14px 处要还是浅滩（画出来的剖面），不能垂直扎下去
+    const shoal = w.groundYAt(Math.min(W - 1, edge + 14)) - w.surfaceAt(edge);
+    ok(shoal >= -4 && shoal <= (w.bedY - w.waterY) * 0.3,
+      `${tag} 入水 14px 才下沉 ${shoal.toFixed(0)}px（近岸是缓浅滩）`);
 
-    // ④ 墙顶上方要留够水头：任意一列从水线到地表的水深 ≥ min(30px, 4.5%h)
-    //    （龟鱼从墙顶上游过去；小窗口按比例放宽）
-    let minHead = Infinity;
-    for (let x = 0; x <= Math.round(w.bankSpan * w.shoreRatio * 0.8); x += 6) {
-      minHead = Math.min(minHead, w.groundYAt(x) - w.surfaceAt(x));
-    }
-    ok(minHead >= Math.min(30, H * 0.045),
-      `${tag} 墙顶上方最小水头 ${minHead.toFixed(0)}px（≥${Math.min(30, H * 0.045).toFixed(0)}，龟鱼过得去）`);
+    // ── 阶段 8-⑬ 剖面水体量化 ──
+    // ① 物理地板处处沉到池底（水下土体不挡路）
+    let minFloor = Infinity;
+    for (let x = 0; x <= W; x += 6) minFloor = Math.min(minFloor, w.swimFloorY(x));
+    ok(minFloor >= w.bedY - 4,
+      `${tag} 剖面地板最浅 ${minFloor.toFixed(0)}px（≥池底 ${w.bedY.toFixed(0)}-4，龟鱼游得进"土"里）`);
+    // ② 岸坡列的水头：水线到剖面地板的深度要够龟鱼下潜
+    const headBank = w.swimFloorY(4) - w.surfaceAt(4);
+    ok(headBank >= (w.bedY - w.waterY) * 0.8,
+      `${tag} 岸坡列可游水深 ${headBank.toFixed(0)}px（≥总水深的 80%）`);
 
-    // 水体（阶段 8-⑫ 岸沉底后：水面占宽 100%，面积从 44.3% 涨到 ~55%）
-    //   **面积占比** = 水在画面里到底占多大一块 —— "看起来水多不多"的正解。
-    let wArea = 0;
+    // 水体：视觉水面积（水线→画出的地表）+ 可游面积（水线→剖面地板，才是"水多不多"的正解）
+    let wArea = 0, sArea = 0;
     for (let x = 0; x <= W; x += 2) {
-      const s = w.surfaceAt(x), g = w.groundYAt(x);
+      const s = w.surfaceAt(x), g = w.groundYAt(x), f = w.swimFloorY(x);
       wArea += Math.max(0, Math.min(g, H) - Math.max(s, 0)) * 2;
+      sArea += Math.max(0, Math.min(f, H) - Math.max(s, 0)) * 2;
     }
     const areaFrac = wArea / (W * H);
-    ok(frac >= 0.98, `${tag} 水面占宽 ${(frac * 100).toFixed(0)}%（≥98%，铺满全宽）`);
-    ok(areaFrac >= 0.52,
-      `${tag} 水体面积占画面 ${(areaFrac * 100).toFixed(1)}%（≥52%）`);
+    const swimFrac = sArea / (W * H);
+    ok(areaFrac >= 0.40,
+      `${tag} 视觉水体面积占画面 ${(areaFrac * 100).toFixed(1)}%（≥40%）`);
+    ok(swimFrac >= 0.60,
+      `${tag} 可游水体面积占画面 ${(swimFrac * 100).toFixed(1)}%（≥60%，剖面把水下土体让给了水）`);
   }
 
-  // 11) landZones / waterSpans 结构（阶段 8-⑫：无陆地，一段全宽水域）
-  ok(w.landZones.length === 0, `${tag} 无陆地（左岸已沉入水下，实际 ${w.landZones.length}）`);
-  ok(w.waterSpans.length === 1 && w.waterSpans[0].x0 <= 4 && w.waterSpans[0].x1 >= W - 4,
-    `${tag} 一段全宽水域（实际 ${JSON.stringify(w.waterSpans)}）`);
-  // 无岸时 shorePointNear 必须退回水域中心、不越界（龟的上岸目标兜底契约）
-  {
-    const sp = w.shorePointNear(W * 0.9);
-    ok(sp.x >= 0 && sp.x <= W && Math.abs(sp.y - w.surfaceAt(sp.x)) <= 30,
-      `${tag} 无岸时 shorePointNear 退回水域中心`);
-  }
+  // 11) landZones / waterSpans 结构（阶段 8-⑬：陆地 = 左岸 [+ 晒台]）
+  ok(w.landZones.length >= 1, `${tag} 至少一块陆地（实际 ${w.landZones.length}）`);
+  ok(w.landZones.some((z) => z.kind === 'bank'), `${tag} 至少有一块"岸"型的陆块（龟有地方爬上去）`);
+  ok(w.waterSpans.length >= 1, `${tag} 水域 ${w.waterSpans.length} 段`);
+  if (w.platform.on) ok(w.waterSpans.length >= 2, `${tag} 晒台把水域切成两段（实际 ${w.waterSpans.length}）`);
 
   // 12) 岸顶草皮层的下沿不会越过水线（不会盖在水面上）
   let over = 0;
@@ -212,9 +203,9 @@ console.log('\n=== B. 晒台（阶段 8-⑧ 起默认关闭；临时打开应仍
   {
     const w = new World(1280, 720);
     ok(w.waterSpans.length === 1, `默认只剩一段水（实际 ${w.waterSpans.length}）`);
-    ok(w.landZones.length === 0, `左岸沉底后无陆地（实际 ${w.landZones.length}）`);
+    ok(w.landZones.length === 1, `默认只有左岸一块陆（实际 ${w.landZones.length}）`);
     const cx = 640;
-    ok(w.isWater(cx, (w.surfaceAt(cx) + w.groundYAt(cx)) / 2), '池中央是水');
+    ok(w.isWater(cx, (w.surfaceAt(cx) + w.swimFloorY(cx)) / 2), '池中央是水');
   }
   // 打开晒台的对照：台地仍要能露出水面、龟站得住、水域被切成两段
   CONFIG.layout.platform.enabled = true;
@@ -222,7 +213,7 @@ console.log('\n=== B. 晒台（阶段 8-⑧ 起默认关闭；临时打开应仍
     const w = new World(1280, 720);
     ok(w.platform.on, '临时打开后晒台生效');
     ok(w.waterSpans.length >= 2, `晒台把水域切成两段（实际 ${w.waterSpans.length}）`);
-    ok(w.landZones.length === 1, `沉底后唯一的陆块 = 晒台（实际 ${w.landZones.length}）`);
+    ok(w.landZones.length >= 2, `晒台 + 左岸 = 至少两块陆（实际 ${w.landZones.length}）`);
     const px = w.platform.cx;
     ok(w.isLand(px, w.groundYAt(px)), '晒台上算干地（龟能站）');
     let leaked = 0;
@@ -242,12 +233,14 @@ console.log('\n=== C. resize 后几何重建 ===');
   w.resize(800, 500);
   const b = w.groundYAt(20);
   ok(w.w === 800 && w.h === 500, 'resize 更新了宽高');
-  // 阶段 8-⑫：墙顶在水下 —— resize 后仍要满足"水线 < 墙顶 < 池底"且随尺寸重算
-  ok(Number.isFinite(b) && b > w.surfaceAt(20) && b < w.bedY,
-    `resize 后墙顶仍没入水下（${a.toFixed(0)} → ${b.toFixed(0)}，水线 ${w.surfaceAt(20).toFixed(0)}）`);
-  ok(Math.abs(w.bankTopY - w.waterY - w.h * 0.055) < w.h * 0.02,
-    `resize 后墙顶吃水仍 ≈ 5.5%h（实际 ${((w.bankTopY - w.waterY) / w.h * 100).toFixed(1)}%）`);
-  ok(w.landZones.length >= 0 && w.waterSpans.length >= 1, 'resize 后水陆分区重建');
+  // 阶段 8-⑬：岸顶在水线上 —— resize 后仍要满足"岸顶 < 水线 < 池底"且随尺寸重算
+  ok(Number.isFinite(b) && b < w.surfaceAt(20), `resize 后地表重算（${a.toFixed(0)} → ${b.toFixed(0)}）`);
+  ok(w.bankTopY < w.waterY && w.waterY < w.bedY, 'resize 后高度顺序保持 岸顶<水线<池底');
+  // 剖面地板在 resize 后仍处处到池底
+  let minFloor = Infinity;
+  for (let x = 0; x <= 800; x += 6) minFloor = Math.min(minFloor, w.swimFloorY(x));
+  ok(minFloor >= w.bedY - 4, `resize 后剖面地板仍到池底（${minFloor.toFixed(0)} / ${w.bedY}）`);
+  ok(w.landZones.length >= 1 && w.waterSpans.length >= 1, 'resize 后水陆分区重建');
 }
 
 console.log('\n=== D. 侧视脚印（阶段 8-⑧：由俯视爪印改成侧视踩痕）===');
@@ -266,30 +259,28 @@ console.log('\n=== D. 侧视脚印（阶段 8-⑧：由俯视爪印改成侧视�
   };
 
   const w = new World(1920, 1080);
-  // 阶段 8-⑫：默认地形已无陆地（左岸沉底）→ 脚印系统应自然休眠（isLand 闸门拒收）
-  let made0 = 0;
-  for (let i = 0; i < 6; i++) {
-    const before = w.footprints.length;
-    w.addFootprint(100 + i * 9, w.groundYAt(100 + i * 9) - 2, Math.PI, 34, i % 2 ? 1 : -1);
-    if (w.footprints.length > before) made0++;
-  }
-  ok(made0 === 0, `无陆地时水下不留脚印（拒收 ${6 - made0}/6）`);
-
-  // 打开晒台 = 造一块合法陆地，脚印的形状防回退断言全部照常跑
-  CONFIG.layout.platform.enabled = true;
-  const wp = new World(1920, 1080);
-  const zone = wp.landZones[0];
-  const bankX = zone ? zone.mid : wp.waterLeftX * 0.45;
+  // 阶段 8-⑬：左岸已恢复 —— 脚印系统在真岸上照常工作
+  const bankZone = w.landZones.find((z) => z.kind === 'bank');
+  const bankX = bankZone ? bankZone.mid : w.waterLeftX * 0.45;
   let made = 0;
   for (let i = 0; i < 6; i++) {
     const x = bankX + (i - 2.5) * 9;
-    const before = wp.footprints.length;
-    wp.addFootprint(x, wp.groundYAt(x) - 2, Math.PI, 34, i % 2 ? 1 : -1);
-    if (wp.footprints.length > before) made++;
+    const before = w.footprints.length;
+    w.addFootprint(x, w.groundYAt(x) - 2, Math.PI, 34, i % 2 ? 1 : -1);
+    if (w.footprints.length > before) made++;
   }
   ok(made >= 4, `岸上留下一串脚印（${made} / 6）`);
+  // 但开阔水面的"假地面"不留脚印（8-⑫ 期间用户实测 bug：龟在水上走出脚印）
+  let madeWater = 0;
+  for (let i = 0; i < 6; i++) {
+    const x = Math.round(w.w * 0.6) + i * 9;
+    const before = w.footprints.length;
+    w.addFootprint(x, w.surfaceAt(x) + 1, Math.PI, 34, i % 2 ? 1 : -1);
+    if (w.footprints.length > before) madeWater++;
+  }
+  ok(madeWater === 0, '水面上不留脚印（isLand 闸门拒收）');
 
-  wp._drawFootprints(ctx);
+  w._drawFootprints(ctx);
   ok(rec.fills + rec.strokes >= made * 3, `每个脚印至少 3 个形状（fill ${rec.fills} / stroke ${rec.strokes}）`);
 
   // ① 侧视的"扁"：每个形状的纵向半径必须远小于横向半径
@@ -301,40 +292,41 @@ console.log('\n=== D. 侧视脚印（阶段 8-⑧：由俯视爪印改成侧视�
   ok(rec.arcs === 0, '不再画脚趾圆（arc = 0，俯视爪印已彻底去掉）', `arc=${rec.arcs}`);
 
   // ③ 脚印躺在**地表**上（侧视：痕迹只能出现在地表）
-  const off = wp.footprints.filter((f) => Math.abs(f.y - wp.groundYAt(f.x)) > 26).length;
+  const off = w.footprints.filter((f) => Math.abs(f.y - w.groundYAt(f.x)) > 26).length;
   ok(off === 0, '每个脚印都贴在地表附近', off ? `${off} 个离地` : '');
 
   // ④ 倾斜角跟的是**地形坡度**，不是俯视行进方向
-  const badRot = wp.footprints.filter((f) => {
-    const want = Math.atan((wp.groundYAt(f.x + 4) - wp.groundYAt(f.x - 4)) / 8);
+  const badRot = w.footprints.filter((f) => {
+    const want = Math.atan((w.groundYAt(f.x + 4) - w.groundYAt(f.x - 4)) / 8);
     return Math.abs((f.rot ?? 0) - want) > 1e-6;
   }).length;
   ok(badRot === 0, '倾斜角 = 地形坡度（不再是俯视的 rotate(angle)）', badRot ? `${badRot} 个不对` : '');
-  CONFIG.layout.platform.enabled = false;   // 恢复默认
 }
 
-console.log('\n=== E. 水陆之间没有"死带"（点判定，阶段 8-⑧）===');
-// 不变量：水面到池底之间的任何一个点，必须**要么在水里要么在岸上**。
-// 阶段 8-⑧ 实测过两处空档（都不是断言过时，是真 bug）：
-//   · 水线以上 3px：`isWater` 为了让浮面饲料算在水里而留的余量 →
-//     龟在 climb_out / return 途中身体中心必经此处（跑 2 分钟 1616 帧越界）；
-//   · 池底上方 4px：`isWater` 下边界留的余量 → 龟贴底游时同样掉出去。
-// 现在由 isWater 的下边界（收到池底）+ isLand 的水线过渡带一起兜住。
+console.log('\n=== E. 水陆之间没有"死带"（点判定，阶段 8-⑬）===');
+// 不变量（8-⑬ 剖面水体版）：
+//   ① 水线以下到**剖面地板**之间逐点必须都是水（土体只是剖面，龟鱼一路游到池底）；
+//   ② 干地列贴着地表要算陆（龟站得住）；近岸浅水列的水线过渡带要算陆（过界必经）。
 for (const [W, H] of [[1920, 1080], [1280, 720], [800, 500], [1000, 1400]]) {
   const w = new World(W, H);
   let gap = 0, tested = 0, firstGap = '';
   for (let x = 1; x < w.w; x += 7) {
-    if (!w.isWaterColumn(x)) continue;
-    const s = w.surfaceAt(x), g = w.groundYAt(x);
-    for (let y = s - 25; y <= g; y += 2) {
+    const s = w.surfaceAt(x), f = w.swimFloorY(x);
+    for (let y = Math.floor(s) + 1; y <= f; y += 2) {
       tested++;
-      if (!w.isWater(x, y) && !w.isLand(x, y)) {
-        if (!gap) firstGap = `首个 (${x.toFixed(0)},${y.toFixed(0)}) 水线 ${s.toFixed(0)} 池底 ${g.toFixed(0)}`;
+      if (!w.isWater(x, y)) {
+        if (!gap) firstGap = `首个 (${x},${y.toFixed(0)}) 水线 ${s.toFixed(0)} 地板 ${f.toFixed(0)}`;
         gap++;
       }
     }
+    // 干地表面的可站性
+    const g = w.groundYAt(x);
+    if (g <= s + 2 && !w.isLand(x, g)) {
+      if (!gap) firstGap = `干地不可站 (${x},${g.toFixed(0)})`;
+      gap++;
+    }
   }
-  ok(gap === 0, `${W}×${H} 水线下到池底无死带`, gap ? `${gap}/${tested} 个点悬空 · ${firstGap}` : `${tested} 个点全部有归属`);
+  ok(gap === 0, `${W}×${H} 水线→剖面地板全是水 + 干地可站`, gap ? `${gap}/${tested} 个点悬空 · ${firstGap}` : `${tested} 个点全部有归属`);
 }
 
 console.log(`\n=== 合计：通过 ${pass} / 失败 ${fail} ===`);

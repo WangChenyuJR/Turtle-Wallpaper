@@ -51,7 +51,9 @@ export class Food {
     if (this.splash > 0) this.splash = Math.max(0, this.splash - dt * 2.5);
 
     const floating = CONFIG.food?.float !== false;
-    const onWater = world.isWaterColumn(this.x);
+    // 8-⑬ 剖面水体：飘不飘在水面看 y 相对水线，不看视觉水列 ——
+    // 岸坡土前（剖面水体）撒的饲料也浮在水面上，不会被当成"掉岸上"吸上岸坡
+    const onWater = !world || this.y > world.surfaceAt(this.x) - 2;
 
     if (floating) {
       if (onWater) {

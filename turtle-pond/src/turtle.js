@@ -138,9 +138,9 @@ export class Turtle {
     return this.world.surfaceAt(x) + this.size * 0.30;
   }
 
-  /** 水体下界（池底上 size*0.34） */
+  /** 水体下界（8-⑬ 剖面地板：水下土体只是剖面，龟能一路下潜到池底） */
   _waterBotY(x = this.x) {
-    return Math.max(this._waterTopY(x) + 6, this.world.groundYAt(x) - this.size * 0.34);
+    return Math.max(this._waterTopY(x) + 6, this.world.swimFloorY(x) - this.size * 0.34);
   }
 
   /** 按当前 depth 把 y 对齐到水层 */
@@ -418,7 +418,9 @@ export class Turtle {
 
     // 移动后重新对齐：在水里 → y 必须落在水层内（并回收 depth）
     const waterState = this.state === STATE.SWIM || this.state === STATE.SEEK_FOOD;
-    const inWaterCol = W.isWaterColumn(this.x);
+    // 8-⑬：用可游泳列（剖面水体全宽）判断，而不是视觉水列 ——
+    // 否则龟游进岸坡前的剖面水体会被当成"上岸"拉回池心
+    const inWaterCol = W.isSwimColumn(this.x);
     if (waterState) {
       if (!inWaterCol) {
         // 被挤到岸上 → 拉回最近的水域
@@ -454,14 +456,18 @@ export class Turtle {
       }
     }
 
-    // ── 避让其它乌龟 ───────────────────────────────────
+    // ── 避让其它乌龟（阶段 8-⑧：侧视图里两只龟允许重叠）────
+    // 旧值 min = size*1.1 / push 26 —— 相当于给每只龟套了个实体球，两只碰面必被弹开。
+    // 侧视剖面没有纵深，重叠不会穿帮，所以间距与推力都按 CONFIG.turtle 调小。
+    const gapK = T.bodyGap ?? 1.1;
+    const gapPush = T.bodyPush ?? 26;
     for (const o of turtles) {
       if (o === this) continue;
       const d2 = dist2(this.x, this.y, o.x, o.y);
-      const min = this.size * 1.1;
+      const min = this.size * gapK;
       if (d2 < min * min && d2 > 0.01) {
         const d = Math.sqrt(d2);
-        const push = (min - d) / min * 26;
+        const push = (min - d) / min * gapPush;
         this.x += ((this.x - o.x) / d) * push;
         this.y += ((this.y - o.y) / d) * push;
       }
