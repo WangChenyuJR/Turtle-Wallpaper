@@ -113,21 +113,40 @@ export class World {
     // 落差还要服从"缓坡"约束：落差 ≤ 可用水平跨度(sr×bankSpan) ÷ minRun。
     // 竖屏（如 1000×1400）宽度不够摊开一条缓坡时，这里会自动压低岸顶、
     // 让出一点天空 —— 宁可天空多留一点，也不做一道竖直的坎给龟爬。
-    const maxDrop = (sr * this.bankSpan) / minRun;
-    const drop = Math.min(Math.max(24, wY - this.bankTopY), Math.max(24, maxDrop));
-    this.bankTopY = Math.round(wY - drop);
-
-    const tY = this.bankTopY;
+    // 阶段 8-⑫：**左岸整体沉入水下**（用户："左侧的墙壁需要被水覆盖，让龟和鱼
+    // 也能过去，只是侧面能看到墙壁"）—— 水面铺满全宽，墙顶没入水线之下，
+    // 龟鱼直接从"墙"上方游过去；侧视图里仍看得见这道水下缓台/墙的轮廓。
+    // 想恢复露出水面的岸：CONFIG.layout.bank.submerged = false。
     const shelfSpan = clamp(BK.shelfRatio ?? 0.58, 0.2, 0.95) * sr;
-    this._bankPts = [
-      { t: 0, y: tY },
-      { t: shelfSpan, y: tY + (wY - tY) * (BK.shelfDrop ?? 0.15) }, // 岸顶缓台
-      { t: sr, y: wY },                                             // 岸线（正好落在水线）
-      // ── 水下：先一大段浅滩（缓），再折向池壁 ──
-      { t: sr + (1 - sr) * (BK.shoalSpan ?? 0.34), y: wY + (bY - wY) * (BK.shoalDrop ?? 0.13) },
-      { t: sr + (1 - sr) * (BK.wallSpan ?? 0.66), y: wY + (bY - wY) * (BK.wallDrop ?? 0.55) },
-      { t: 1, y: bY },                                              // 池底
-    ];
+    if (BK.submerged !== false) {
+      const sink = Math.max(12, this.h * (BK.sinkRatio ?? 0.055));  // 墙顶没入水下的深度
+      this.bankSubmerged = true;
+      this.bankTopY = Math.round(wY + sink);
+      const tY = this.bankTopY;
+      const depth = Math.max(40, bY - tY);
+      this._bankPts = [
+        { t: 0, y: tY },                                                  // 墙顶（水下缓台外缘）
+        { t: shelfSpan, y: tY + depth * (BK.subShelfDrop ?? 0.035) },     // 水下缓台
+        { t: sr, y: tY + depth * (BK.subWallDrop ?? 0.58) },              // 墙面（剖面里最陡的一段）
+        { t: sr + (1 - sr) * (BK.shoalSpan ?? 0.34), y: tY + depth * 0.82 }, // 墙脚散水
+        { t: 1, y: bY },                                                  // 池底
+      ];
+    } else {
+      const maxDrop = (sr * this.bankSpan) / minRun;
+      const drop = Math.min(Math.max(24, wY - this.bankTopY), Math.max(24, maxDrop));
+      this.bankTopY = Math.round(wY - drop);
+
+      const tY = this.bankTopY;
+      this._bankPts = [
+        { t: 0, y: tY },
+        { t: shelfSpan, y: tY + (wY - tY) * (BK.shelfDrop ?? 0.15) }, // 岸顶缓台
+        { t: sr, y: wY },                                             // 岸线（正好落在水线）
+        // ── 水下：先一大段浅滩（缓），再折向池壁 ──
+        { t: sr + (1 - sr) * (BK.shoalSpan ?? 0.34), y: wY + (bY - wY) * (BK.shoalDrop ?? 0.13) },
+        { t: sr + (1 - sr) * (BK.wallSpan ?? 0.66), y: wY + (bY - wY) * (BK.wallDrop ?? 0.55) },
+        { t: 1, y: bY },                                              // 池底
+      ];
+    }
 
     // ── 晒台 ──────────────────────────────────────────
     const P = L.platform ?? {};

@@ -170,7 +170,11 @@ ok(wave.cols < 600, `1920 宽只需 ${wave.cols} 格/帧（旧 2D 版约 42k 格
   const t0 = process.hrtime.bigint();
   for (let i = 0; i < 600; i++) wave.update(1 / 60, { ambient: false });
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  ok(ms < 300, `600 帧推进 ${ms.toFixed(1)}ms（${(ms / 600).toFixed(3)}ms/帧）`);
+  // ⚠️ 这是**墙上时钟**断言，必然随系统负载抖动 —— 曾经在"一次连跑 11 个诊断"时偶发 FAIL
+  //    （实测 12 次单独跑 0 次失败，批量跑却挂过 1 次）。所以只当**性能冒烟**用：
+  //    阈值放到 3000ms（正常 ~10ms，差 300 倍才报），用来抓"波场突然慢了两个数量级"，
+  //    而不是量实际性能。真要测性能请单独跑、并用多轮中位数。
+  ok(ms < 3000, `600 帧推进 ${ms.toFixed(1)}ms（${(ms / 600).toFixed(3)}ms/帧）[性能冒烟，非基准]`);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -277,7 +281,12 @@ ok(!err, 'PondApp 在桩环境里构造成功', err ? `${err.constructor.name}: 
 if (app) {
   const A = app.world;
   const mid = (A.waterSpans[0].x0 + A.waterSpans[0].x1) / 2;
-  const fire = (x, y) => window.dispatchEvent({ type: 'mousemove', clientX: x, clientY: y });
+  // 阶段 8-⑨ 起：mousemove 只记坐标，尾迹由 _updateCursorFx 按渲染帧驱动 ——
+  // 桩测里"发事件后步一帧"，和真实主循环的节奏一致
+  const fire = (x, y) => {
+    window.dispatchEvent({ type: 'mousemove', clientX: x, clientY: y });
+    app._updateCursorFx(1 / 60);
+  };
 
   // ── C1. 水面附近 → 拖尾 ──
   A.wakeTrails.length = 0; A.stirBits.length = 0;

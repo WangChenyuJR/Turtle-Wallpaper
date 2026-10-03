@@ -50,10 +50,10 @@ for (const [W, H] of [[1920, 1080], [1280, 720], [800, 500]]) {
   check(`${W}x${H} 每列恰好属于水或陆`, both === 0 && neither === 0, `both=${both} neither=${neither}`);
 }
 
-// ── D. shorePointNear 一定落在陆地上 ──
-// 阶段 8-⑦ 取消右岸后，水域一直铺到画面右缘：那里的"岸缘"外侧是屏幕边界而非陆地。
-// 所以只在**真的有水**的列上问"最近的岸"（那是龟会问它的场合），并断言返回的是真陆列。
-console.log('\n=== D. shorePointNear 落点可达陆地 ===');
+// ── D. shorePointNear 的契约（阶段 8-⑫ 更新）──
+// 默认地形左岸沉入水下 → **无陆列**，shorePointNear 必须走"退回水域中心"的兜底：
+// 返回点不越界、贴着水线（龟的上岸决策拿不到真岸时据此自然休眠）。
+console.log('\n=== D. shorePointNear 兜底契约（无岸世界）===');
 for (const [W, H] of [[1920, 1080], [1280, 720], [800, 500]]) {
   const world = new World(W, H);
   let bad = 0, tested = 0;
@@ -61,9 +61,9 @@ for (const [W, H] of [[1920, 1080], [1280, 720], [800, 500]]) {
     if (!world.isWaterColumn(x)) continue;
     tested++;
     const sp = world.shorePointNear(x);
-    if (!world.isLandColumn(sp.x)) bad++;
+    if (!(sp.x >= 0 && sp.x <= W) || Math.abs(sp.y - world.surfaceAt(sp.x)) > 30) bad++;
   }
-  check(`${W}x${H} shorePointNear 全部落在陆列（${tested} 个水列）`, bad === 0, `不达标 ${bad}`);
+  check(`${W}x${H} shorePointNear 退回水域中心且不越界（${tested} 个水列）`, bad === 0, `不达标 ${bad}`);
 }
 // D2. 取消右岸后水体应该明显占更多（用户："尽量让水体占更多"）
 console.log('\n=== D2. 取消右岸 → 水体占比 ===');
@@ -161,10 +161,15 @@ function crowd(set, seed) {
   return { tight: tight / frames * 100, nn: nnSum / frames };
 }
 {
-  // 老行为 = 8-⑧ 原样：漫游只在附近打转、没有个人空间力
+  // ⚠️ 阶段 8-⑫：默认地形左岸沉底 → 水体几乎翻倍，"老行为"在大水体里**不再聚团**，
+  // 老-新对照的锚在新地形下失效（判据必须跟着世界模型走）。
+  // 所以：老行为对照切回**旧地形**（岸露出水面）跑，8-⑪ 的回归照常守；
+  // 新地形单独断言"当前配置不聚团"。
+  CONFIG.layout.bank.submerged = false;
   const old = crowd({ roamRadius: 200, spacing: 0, spacingForce: 0 }, 20261003);
-  const on = crowd({}, 20261003);                 // 直接读 CONFIG.fish 当前值
-  check('老行为确实老是一团（复现用户现象）', old.tight >= 50, `拥挤帧 ${old.tight.toFixed(0)}%`);
+  CONFIG.layout.bank.submerged = true;
+  const on = crowd({}, 20261003);                 // 直接读 CONFIG.fish 当前值（新地形）
+  check('老行为确实老是一团（旧地形复现用户现象）', old.tight >= 50, `拥挤帧 ${old.tight.toFixed(0)}%`);
   check('现在拥挤帧 ≤ 20%（实测 5%）', on.tight <= 20, `拥挤帧 ${on.tight.toFixed(0)}%`);
   check('拥挤帧至少降 5 倍', old.tight >= on.tight * 5,
     `${old.tight.toFixed(0)}% → ${on.tight.toFixed(0)}%`);

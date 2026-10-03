@@ -159,8 +159,14 @@ if (app) {
   // 倒影必须落在水面里（各自灯的岸线以下）
   const banks = app.lamp.list().map((l) => app.world.bankLineAt(l.x));
   const minBank = Math.min(...banks);
-  const wrong = litRects.filter((r) => r.y < minBank - 2);
-  ok(wrong.length === 0, `倒影没有画到岸上（全在水面内，最高岸线 ${minBank.toFixed(0)}）`);
+  // ⚠️ lighter+fillRect 的还有两处**合法**的水上元素：水线空气侧柔光（全宽横条，
+  //    横跨水线）和灯丝亮核（灯罩里）—— 它们在水线上方是设计行为。
+  //    "不画到岸上"只需要考察**落在水面层里**的加光矩形（真正的倒影横条）。
+  const inWater = litRects.filter((r) => r.y >= app.world.waterTop - 2);
+  const wrong = inWater.filter((r) => r.y < minBank - 2);
+  ok(inWater.length >= nLamp * 10, `水面层里的加光矩形 = 倒影横条（${inWater.length} 条）`);
+  ok(wrong.length === 0, `倒影没有画到岸上（全在水面内，最高岸线 ${minBank.toFixed(0)}）`,
+    wrong.length ? wrong.slice(0, 4).map((r) => `(${r.x.toFixed(0)},${r.y.toFixed(0)},${r.w.toFixed(0)}x${r.h.toFixed(0)})`).join(' ') : '');
   // 不是只画了第一盏：每盏灯附近都得有自己的倒影列
   const covered = app.lamp.list().filter((l) =>
     litRects.some((r) => Math.abs(r.x + r.w / 2 - l.x) < 220)).length;
