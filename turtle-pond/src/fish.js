@@ -280,7 +280,13 @@ export class Fish {
         for (let k = 0; k < 8; k++) {
           const a = rand(0, Math.PI * 2);
           const r = rMax * rand(0.3, 1);
-          const tx = clamp(this.x + Math.cos(a) * r, 6, W.w - 6);
+          // 8-⑭：35% 概率直接在全池随机取目标 x（不受"从当前位置出发"限制），
+          // 保证每条鱼都会定期横穿整个池塘；其余仍按相对半径挑近点。
+          // （可配置：8-⑪ 的"老行为"对照实验要把它关掉，否则旧参数也全池漫游、
+          //   聚团现象复现不出来，对照锚失效。）
+          const tx = Math.random() < (F.roamAbsolute ?? 0.35)
+            ? rand(40, W.w - 40)
+            : clamp(this.x + Math.cos(a) * r, 6, W.w - 6);
           // 8-⑬ 剖面水体：下界用剖面地板（池底）—— 鱼能游进岸坡前的"土"里
           const s = W.surfaceAt(tx), g = W.swimFloorY(tx);
           if (g - s < 30) continue;                       // 那一列水深不够，换一个
@@ -294,7 +300,11 @@ export class Fish {
         if (d < 22) {
           T.roamT = Math.min(T.roamT, 0.2);               // 快到了就早点换下一个点
         } else {
-          const f = F.maxForce * (F.roamForce ?? 0.28);
+          // 8-⑭：长距离目标（>260px，多半是全池绝对取的点）给 1.8 倍牵引，
+          // 让鱼"认真赶路"横穿池塘 —— 0.28× 的温吞力会被游走噪声吃掉，
+          // 个体差异大的鱼有的 150 秒只挪 180px（用户："只在很小的范围活动"）。
+          const boost = d > 260 ? 1.8 : 1;
+          const f = F.maxForce * (F.roamForce ?? 0.28) * boost;
           ax += (dx / d) * f;
           ay += (dy / d) * f;
         }
@@ -310,13 +320,19 @@ export class Fish {
     }
 
     // ── 避墙 ───────────────────────────────────────────
+    // 8-⑭：改成**渐进式**——离墙越近推力越大。旧版是恒力 1.2×maxForce，
+    // 而群体外推合力（贴身 1.0 + 个人空间 0.9 + 漫游/游走）能到 ~2.5×，
+    // 结果鱼一旦被挤到墙边就再也回不来（实测 45 秒后 8/10 条钉死在
+    // x=10 / x=w-10，速度仍朝墙里顶——用户："只在很小的水域范围活动"）。
+    // 现在墙面处推力 ≈ 3.4×，必然压过外推合力 → 鱼在离墙一段距离处稳住，
+    // 之后由漫游目标接管，继续巡游全域。
     const m = 42;
     const top = W.surfaceAt(this.x);          // 8-⑬：游泳区上界就是水线
     const bot = W.swimFloorY(this.x);         //      下界是剖面地板（池底）
-    if (this.x < m) ax += F.maxForce * 1.2;
-    if (this.x > W.w - m) ax -= F.maxForce * 1.2;
-    if (this.y < top + m) ay += F.maxForce * 1.4;
-    if (this.y > bot - m) ay -= F.maxForce * 1.4;
+    if (this.x < m) ax += F.maxForce * (1.2 + 3.2 * (1 - this.x / m));
+    if (this.x > W.w - m) ax -= F.maxForce * (1.2 + 3.2 * (1 - (W.w - this.x) / m));
+    if (this.y < top + m) ay += F.maxForce * (1.4 + 3.2 * (1 - (this.y - top) / m));
+    if (this.y > bot - m) ay -= F.maxForce * (1.4 + 3.2 * (1 - (bot - this.y) / m));
 
     // ── 避光标 ─────────────────────────────────────────
     if (cursor.active) {

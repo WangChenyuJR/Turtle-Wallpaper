@@ -188,5 +188,40 @@ CONFIG.layout.platform.enabled = false;   // 恢复默认（左岸露出水面 +
   }
 }
 
+// ── G: 全域漫游 + 无瞬移（8-⑭）──────────────────────────
+// 用户实测两个问题：
+//   ① "大多数龟只在很小的水域范围活动"——旧横向运动只是 vx 随机脉冲（±14、
+//     方向几秒一翻），4 分钟只挪 128px；现在每 8~16s 挑全池目标 x 巡游。
+//   ② "有一些龟会突然下降或上升很多"——三处瞬移源：
+//     · CLIMB_OUT 用 isLandColumn（列判定）把剖面水里的龟当"已上岸"拽上地表；
+//     · 过渡守卫 `y = min(y, groundYAt-4)` 把"土前游泳"当"钻进土里"吸到地表；
+//     · depthGoal 一帧跳 0.75、上浮 rate 1.6 → 10px/帧 垂直冲刺。
+// 阈值 24px = 入水瞬间"扑通"（龟心从岸坡站位落到水柱上界，物理上必然）。
+console.log('\n=== G. 全域漫游 + 无瞬移（8-⑭） ===');
+CONFIG.layout.platform.enabled = false;
+{
+  const world = new World(W, H);
+  const names = ['redear', 'softshell', 'yellowpond', 'mata'];
+  for (const id of names) {
+    const t = makeTurtle(world, id);
+    let x0 = t.x, x1 = t.x, maxDy = 0, py = t.y, prev = t.state;
+    const N = 60 * 150;
+    for (let i = 0; i < N; i++) {
+      t.update(DT, [], CUR, [], { light: 1, isNight: false });
+      t.hunger = 0; t.starveTimer = 0;
+      x0 = Math.min(x0, t.x); x1 = Math.max(x1, t.x);
+      const dy = Math.abs(t.y - py); py = t.y;
+      if (dy > maxDy) maxDy = dy;
+      prev = t.state;
+    }
+    const range = x1 - x0;
+    // 喜岸品种大部分时间在晒背/爬动，水里的漫游范围天然小 —— 按栖息类型分档
+    // （semi 晒背率 0.45、terrestrial 0.85+ 且 72% 只换岸不下水；实测 8-⑭）。
+    const rangeMin = { redear: 300, softshell: 400, yellowpond: 200, mata: 400 }[id] ?? 400;
+    check(`${id} 150 秒横向活动范围 ≥ ${rangeMin}px（全域漫游）`, range >= rangeMin, `实测 ${range.toFixed(0)}px`);
+    check(`${id} 无垂直瞬移（单帧 |dy| ≤ 24px，含入水扑通）`, maxDy <= 24, `最大 ${maxDy.toFixed(1)}px`);
+  }
+}
+
 console.log(`\n=== 合计：通过 ${pass} / 失败 ${fail} ===`);
 process.exit(fail ? 1 : 0);

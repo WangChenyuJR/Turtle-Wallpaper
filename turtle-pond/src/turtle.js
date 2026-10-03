@@ -257,8 +257,14 @@ export class Turtle {
           // 爱待水的龟决策更频繁但停留更久（等效更长时间泡水）
           this.decisionTimer = rand(4, 10) * this.behavior.waterBias;
         }
-        // 下潜/上浮决策（阶段 5-⑭）：偶尔潜入深处，再上浮换气
-        if (Math.random() < dt * 0.14) this.depthGoal = this._pickDepthGoal();
+        // 下潜/上浮决策（阶段 5-⑭）：偶尔潜入深处，再上浮换气。
+        // ⚠️ 8-⑭：目标深度与当前深度的差值限幅 —— 旧版一帧从 0.02 跳到 0.77，
+        // 深度插值立刻变成 ~10px/帧 的垂直冲刺（用户："突然下降或上升很多"）。
+        // 分几次决策走完，单次最多挪 0.4 个水层。
+        if (Math.random() < dt * 0.14) {
+          const g = this._pickDepthGoal();
+          this.depthGoal = clamp(clamp(g, this.depth - 0.4, this.depth + 0.4), 0, 1);
+        }
         this._swim(dt);
         break;
       }
@@ -296,7 +302,11 @@ export class Turtle {
       case STATE.CLIMB_OUT: {
         const tgt = this.baskTarget;
         if (!tgt) { this.state = STATE.SWIM; break; }
-        if (W.isLandColumn(this.x)) {
+        // ⚠️ 8-⑭：必须用**点判定**而不是 isLandColumn —— 剖面水体（8-⑬）之后
+        // 龟可以在"陆列"的剖面水里游（y 远低于地表），列判定会把深水里的龟
+        // 当成"已经上岸"，直接沿地表走向目标 → 从水下被拉上岸顶（实测单帧 -39px
+        // 持续拉扯，用户："有一些龟会突然上升很多"）。深水里的龟先游到岸线。
+        if (W.isLand(this.x, this.y)) {
           const z = W.landZoneAt(this.x);
           if (z && (tgt.x < z.x0 || tgt.x > z.x1)) {
             // 目标在"另一块岸"上 → 就近改到本块陆地（不下水绕路，免得卡水缘）
@@ -400,7 +410,9 @@ export class Turtle {
           this.state = STATE.SWIM;
           this.stateTime = 0;
           this.decisionTimer = rand(4, 10) * this.behavior.waterBias;
-          this.depthGoal = rand(0.15, 0.5);
+          // 8-⑭：入水先贴着水面游一会儿再慢慢下潜 —— 旧版直接给 0.15~0.5，
+          // 深度插值第一帧就把龟从岸坡拉下 20+px（"入水即扎猛子"）。
+          this.depthGoal = rand(0.02, 0.12);
           this._syncYFromDepth();
           this.vx = Math.sign(wp.x - this.x || 1) * rand(5, 12);
         } else {
@@ -443,15 +455,16 @@ export class Turtle {
       }
       this._syncDepthFromY();
     } else {
-      // 陆上 / 过界状态：只做池塘兜底
+      // 陆上 / 过界状态：只做池塘兜底。
+      // 8-⑭：贴地分支同样要用点判定（isLandColumn 会把剖面水里的龟拽上地表）；
+      // 水里 / 过渡中的地板是剖面地板，不是画出来的岸坡。
       this.x = clamp(this.x, this.size, W.w - this.size);
-      if (W.isLandColumn(this.x)) {
+      if (W.isLand(this.x, this.y)) {
         const g = W.groundYAt(this.x);
         const want = g - this._footOffset();
         this.y += (want - this.y) * Math.min(1, dt * 4);
       } else {
-        // 跨水陆边界途中：别掉到池底以下
-        this.y = Math.min(this.y, W.groundYAt(this.x) - 4);
+        this.y = Math.min(this.y, W.swimFloorY(this.x) - 4);
         this.y = Math.max(this.y, 8);
       }
     }
@@ -505,7 +518,7 @@ export class Turtle {
     const nowInWater = waterState && W.isWater(this.x, this.y);
     if (nowInWater) {
       const prevDepth = this.depth;
-      const rate = this.depthGoal < this.depth ? 1.6 : 0.9;   // 上浮比下潜更急
+      const rate = this.depthGoal < this.depth ? 1.0 : 0.9;   // 8-⑭：上浮降速（1.6 时换气/换层是 8~10px/帧 的垂直冲刺）
       this.depth += (this.depthGoal - this.depth) * Math.min(1, dt * rate);
       this._syncYFromDepth();
       const dv = (this.depth - prevDepth) / Math.max(dt, 1e-4);
@@ -542,10 +555,35 @@ export class Turtle {
   }
 
   _swim(dt) {
-    // 横向随机漫游
-    if (Math.random() < dt * 0.5) this.vx += rand(-14, 14);
+    const T = CONFIG.turtle;
+    // ── 全域漫游目标（阶段 8-⑭）──────────────────────────
+    // 旧版横向只靠 vx 随机脉冲（±14、半秒一次、阻尼 0.99/帧）——
+    // 方向几秒就翻转，均方位移小得可怜（实测 4 分钟只挪 128px，
+    // 用户："大多数龟只在很小的水域范围活动"）。
+    // 现在每 8~16s 挑一个**全池**目标 x 朝它巡游；偶尔就地悬停。
+    this._roamT = (this._roamT ?? 0) - dt;
+    const arrived = this._roamX != null && Math.abs(this._roamX - this.x) < 26;
+    if (this._roamT <= 0 || arrived) {
+      this._roamT = rand(8, 16);
+      if (Math.random() < 0.16) {
+        this._roamX = this.x;                    // 偶尔悬停一会儿（别游成永动机）
+      } else {
+        let gx = this.x;
+        for (let k = 0; k < 8; k++) {
+          gx = rand(50, this.world.w - 50);
+          if (this.world.isSwimColumn(gx)) break; // 别把目标挑进晒台台面
+        }
+        this._roamX = gx;
+      }
+    }
+    // 朝目标巡航：远处全速、接近减速，保留轻微抖动别游成直线
+    if (this._roamX != null) {
+      const want = clamp((this._roamX - this.x) / 30, -1, 1) * T.swimSpeed * 0.8;
+      this.vx += (want - this.vx) * Math.min(1, dt * 1.4);
+    }
+    if (Math.random() < dt * 0.5) this.vx += rand(-5, 5);
     this.vx *= 0.99;
-    const max = CONFIG.turtle.swimSpeed;
+    const max = T.swimSpeed;
     this.vx = clamp(this.vx, -max, max);
     this.x += this.vx * dt;
 
@@ -553,7 +591,7 @@ export class Turtle {
     const top = this._waterTopY();
     const bot = this._waterBotY();
     const ty = top + (bot - top) * clamp(this.depthGoal, 0, 1);
-    const rate = this.depthGoal < this.depth ? 1.6 : 0.9;
+    const rate = this.depthGoal < this.depth ? 1.0 : 0.9;
     this.y += (ty - this.y) * Math.min(1, dt * rate);
 
     if (Math.abs(this.vx) > 1) {

@@ -163,12 +163,53 @@ function crowd(set, seed) {
 {
   // 阶段 8-⑬：默认地形恢复为"岸露出水面"（8-⑫ 的 submerged 开关已删除），
   // 水 体量回到 8-⑪ 时的水平，老-新对照直接在默认地形上跑即可。
-  const old = crowd({ roamRadius: 200, spacing: 0, spacingForce: 0 }, 20261003);
+  const old = crowd({ roamRadius: 200, spacing: 0, spacingForce: 0, roamAbsolute: 0 }, 20261003);
   const on = crowd({}, 20261003);                 // 直接读 CONFIG.fish 当前值
-  check('老行为确实老是一团（复现用户现象）', old.tight >= 40, `拥挤帧 ${old.tight.toFixed(0)}%`);
+  // 阈值 25：渐进避墙（8-⑭）对"老行为"也生效——鱼被墙推着散开，拥挤帧
+  // 比 8-⑪ 复现时（48%）低。锚的作用只是"旧参数确实更爱聚团"，不是精确复现。
+  check('老行为确实老是一团（复现用户现象）', old.tight >= 25, `拥挤帧 ${old.tight.toFixed(0)}%`);
   check('现在拥挤帧 ≤ 20%（实测 5%）', on.tight <= 20, `拥挤帧 ${on.tight.toFixed(0)}%`);
   check('拥挤帧至少降 5 倍', old.tight >= on.tight * 5,
     `${old.tight.toFixed(0)}% → ${on.tight.toFixed(0)}%`);
+}
+
+// ── G. 全域巡游 + 不钉墙（8-⑭）──────────────────────────
+// 用户实测："大多数鱼只在很小的水域范围活动"。两个元凶：
+//   ① 避墙是恒力（1.2×maxForce），压不过群体外推合力（贴身1.0+个人空间0.9+…），
+//     鱼 45 秒内被顶死在 x=10 / x=w-10 且再也出不来（吸收态）；
+//   ② 漫游目标只从"当前位置±半径"挑，没有全池性的动力。
+// 修法：渐进式避墙（墙面 4.4×）+ 35% 概率全池绝对取目标。
+// ⚠️ 必须按 main.js 的真实调用顺序：先 flock(...) 再 update(dt) ——
+//   只调 update 的探针等于关掉了全部群体力（8-⑭ 实测踩过：假象"全钉墙"）。
+console.log('\n=== G. 全域巡游 + 不钉墙 + 无垂直瞬移（8-⑭） ===');
+{
+  const world = new World(1280, 720);
+  const fs = [];
+  for (let i = 0; i < 10; i++) fs.push(new Fish(world, i));
+  const CUR = { active: false, x: 0, y: 0 };
+  const DT = 1 / 60, N = 60 * 150;
+  for (const f of fs) { f._x0 = f.x; f._x1 = f.x; f._maxdy = 0; f._py = f.y; }
+  let edgeFrames = 0;
+  for (let i = 0; i < N; i++) {
+    for (const f of fs) if (!f.dying) f.flock(fs, CUR, [], DT, null);
+    for (const f of fs) f.update(DT);
+    for (const f of fs) {
+      f._x0 = Math.min(f._x0, f.x); f._x1 = Math.max(f._x1, f.x);
+      const dy = Math.abs(f.y - f._py); f._py = f.y;
+      if (dy > f._maxdy) f._maxdy = dy;
+      if (f.x < 26 || f.x > 1280 - 26) edgeFrames++;
+    }
+  }
+  const ranges = fs.map((f) => f._x1 - f._x0);
+  const meanR = ranges.reduce((a, b) => a + b, 0) / ranges.length;
+  const edgeEnd = fs.filter((f) => f.x < 26 || f.x > 1280 - 26).length;
+  const edgePct = edgeFrames / (N * fs.length) * 100;
+  const maxJump = Math.max(...fs.map((f) => f._maxdy));
+  check('鱼群平均 x 活动范围 ≥ 700px（全域巡游）', meanR >= 700, `实测 ${meanR.toFixed(0)}px`);
+  check('个体最差活动范围 ≥ 300px', Math.min(...ranges) >= 300, `最差 ${Math.min(...ranges).toFixed(0)}px`);
+  check('结尾贴墙（≤26px）的鱼 ≤ 1 条', edgeEnd <= 1, `${edgeEnd} 条`);
+  check('贴墙帧占比 ≤ 8%', edgePct <= 8, `${edgePct.toFixed(1)}%`);
+  check('鱼无垂直瞬移（单帧 |dy| ≤ 4px）', maxJump <= 4, `最大 ${maxJump.toFixed(1)}px`);
 }
 
 console.log(`\n=== 合计：通过 ${pass} / 失败 ${fail} ===`);
